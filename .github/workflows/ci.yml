@@ -35,3 +35,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ./build.sh
+
+  # #31: the Rust binary on Windows and Linux. A noisy 2-page "scan" (Pillow) must come out as a smaller 2-page PDF.
+  cross:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release --manifest-path rust/Cargo.toml && cargo test --release --manifest-path rust/Cargo.toml
+      - run: pip install pillow pypdf
+      - run: |
+          python - <<'PY'
+          import random
+          from PIL import Image, JpegImagePlugin  # noqa: F401 (registers the JPEG writer the PDF saver needs)
+          random.seed(1)
+          pages = [Image.effect_noise((1240, 1754), 60).point(lambda v: 30 if v < 90 else 230) for _ in range(2)]
+          pages[0].save("in.pdf", save_all=True, append_images=pages[1:], resolution=150)
+          PY
+          rust/target/release/bitonalpdf --crop --deskew in.pdf out.pdf
+          python -c "import os, pypdf; n = len(pypdf.PdfReader('out.pdf').pages); a, b = os.path.getsize('in.pdf'), os.path.getsize('out.pdf'); print(n, a, '->', b); assert n == 2 and b < a"
