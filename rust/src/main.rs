@@ -259,8 +259,9 @@ fn main() {
     let metas: Vec<Meta> = if geometry { par_pages(&data, n, |p, i| measure(p, i, &cfg, None)) } else { vec![Meta::default(); n] };
     let mut metas = metas;
     // #52: pages the own detector is unsure of (conf < gate, left at 0) follow the document's majority quarter turn.
+    // Born-digital pages (#107) vote 0: they are upright by definition, so they keep a mixed scan from flipping.
     if cfg.rotate && !cfg.tess {
-        let q = majority_turn(metas.iter().filter(|m| m.conf >= OSD_OWN_MIN_CONFIDENCE && !m.vector).map(|m| m.rot));
+        let q = majority_turn(metas.iter().filter(|m| m.conf >= OSD_OWN_MIN_CONFIDENCE).map(|m| m.rot));
         if q != 0 {
             let low: Vec<usize> = (0..n).filter(|&i| metas[i].conf < OSD_OWN_MIN_CONFIDENCE).collect();
             let redo = par_pages(&data, n, |p, i| if low.contains(&i) { Some(measure(p, i, &cfg, Some(q))) } else { None });
