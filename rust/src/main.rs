@@ -312,7 +312,7 @@ fn main() {
     .flatten()
     .unzip();
     let pages: Vec<(u32, u32, Vec<u8>)> =
-        if cfg.crop { compose(slots) } else { slots.into_iter().map(|(w, h, g, _)| (w, h, g)).collect() };
+        if cfg.crop { compose(slots, &colour.iter().map(Option::is_some).collect::<Vec<_>>()) } else { slots.into_iter().map(|(w, h, g, _)| (w, h, g)).collect() };
     let t2 = Instant::now();
     if cfg.timing {
         eprintln!("pass A {} ms, pass B {} ms", (t1 - t0).as_millis(), (t2 - t1).as_millis());
@@ -517,7 +517,11 @@ fn finish(page: &Page, i: usize, m: &Meta, plan: Plan, (tw, th): (i64, i64), col
     let t0 = Instant::now();
     let mut src = load(page, cfg, m.rot);
     let t1 = Instant::now();
-    if !cfg.slot_flat {
+    // A colour slot without --crop or --deskew only needs its size from the grey page: no flatten, threshold or G4.
+    let nslot = if matches!(plan, Plan::Split(..)) { 2 } else { 1 };
+    let grey_only_size = !cfg.crop && !cfg.deskew;
+    let need_flat = !grey_only_size || col[..nslot].contains(&false);
+    if !cfg.slot_flat && need_flat {
         src = flatten(&src, BLUR_SIGMA);
     }
     if m.angle != 0.0 {
@@ -563,6 +567,9 @@ fn finish(page: &Page, i: usize, m: &Meta, plan: Plan, (tw, th): (i64, i64), col
             } else {
                 (s.w, s.h)
             };
+            if grey_only_size && col[slot] {
+                return ((cw as u32, ch as u32, vec![], [0, 0]), colour);
+            }
             let mut c = rotate(&s, angle, cw, ch, 1.0);
             if cfg.slot_flat {
                 c = flatten(&c, BLUR_SIGMA);
@@ -1085,13 +1092,17 @@ fn reach(rb: &[bool], rw: usize, rh: usize, r: usize, sw: usize, sh: usize, (ccx
 /// --crop (#55): packed 1-bit ink boxes with their text-block anchor -> one canvas; every anchor lands on the
 /// same centre x and top y, the canvas is just big enough for all of them plus a margin, then G4. Pure bit placement.
 // ponytail: one slot with ink far from its text block (an edge band that was not whitened) widens every page
-fn compose(slots: Vec<(u32, u32, Vec<u8>, [usize; 2])>) -> Vec<(u32, u32, Vec<u8>)> {
+/// `colour[i]`: slot i becomes a JPEG page, so only its canvas size is needed (no G4).
+fn compose(slots: Vec<(u32, u32, Vec<u8>, [usize; 2])>, colour: &[bool]) -> Vec<(u32, u32, Vec<u8>)> {
     let ext = |f: &dyn Fn(usize, usize, [usize; 2]) -> usize| slots.iter().map(|s| f(s.0 as usize, s.1 as usize, s.3)).max().unwrap_or(0);
     let half = ext(&|w, _, a| a[0].max(w - a[0]));
     let (top, bot) = (ext(&|_, _, a| a[1]), ext(&|_, h, a| h - a[1]));
     let (mx, my) = ((CROP_PAD_FRAC * 2.0 * half as f64) as usize, (CROP_PAD_FRAC * (top + bot) as f64) as usize);
     let (cw, ch) = (2 * half + 2 * mx, top + bot + 2 * my);
-    let place = |(w, h, p, a): &(u32, u32, Vec<u8>, [usize; 2])| {
+    let place = |(i, (w, h, p, a)): (usize, &(u32, u32, Vec<u8>, [usize; 2]))| {
+        if colour[i] {
+            return (cw as u32, ch as u32, vec![]);
+        }
         let (w, h) = (*w as usize, *h as usize);
         let (ox, oy, stride) = (mx + half - a[0], my + top - a[1], w.div_ceil(8));
         let mut bits = vec![false; cw * ch];
@@ -1104,7 +1115,11 @@ fn compose(slots: Vec<(u32, u32, Vec<u8>, [usize; 2])>) -> Vec<(u32, u32, Vec<u8
     };
     let k = slots.len().div_ceil(std::thread::available_parallelism().map_or(4, |n| n.get()));
     std::thread::scope(|s| {
-        let hs: Vec<_> = slots.chunks(k.max(1)).map(|c| s.spawn(move || c.iter().map(place).collect::<Vec<_>>())).collect();
+        let hs: Vec<_> = slots
+            .chunks(k.max(1))
+            .enumerate()
+            .map(|(j, c)| s.spawn(move || c.iter().enumerate().map(|(i, x)| place((j * k.max(1) + i, x))).collect::<Vec<_>>()))
+            .collect();
         hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
     })
 }
@@ -2491,7 +2506,7 @@ mod tests {
     #[test]
     fn compose_equal_margins() {
         let slot = |w: usize, h: usize| (w as u32, h as u32, vec![0xFFu8; w.div_ceil(8) * h], [w / 2, 0]);
-        let pages = compose(vec![slot(96, 40), slot(160, 56)]);
+        let pages = compose(vec![slot(96, 40), slot(160, 56)], &[false, false]);
         let pdf = write_pdf(&pages, 150.0);
         let doc = Pdf::new(Arc::new(pdf)).unwrap();
         for page in doc.pages().iter() {
