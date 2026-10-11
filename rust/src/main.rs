@@ -147,6 +147,7 @@ struct Meta {
     trim: Option<[i64; 4]>, // x0 y0 x1 y1
     cand: bool,
     gutter: Option<(i64, i64)>, // x, width
+    vector: bool, // born-digital page (#107): its turn is the PDF's own and it is no scan of a spread
 }
 
 /// The quarter turn most confident pages agree on; no pages or a tie for first place -> 0 (#52).
@@ -259,7 +260,7 @@ fn main() {
     let mut metas = metas;
     // #52: pages the own detector is unsure of (conf < gate, left at 0) follow the document's majority quarter turn.
     if cfg.rotate && !cfg.tess {
-        let q = majority_turn(metas.iter().filter(|m| m.conf >= OSD_OWN_MIN_CONFIDENCE).map(|m| m.rot));
+        let q = majority_turn(metas.iter().filter(|m| m.conf >= OSD_OWN_MIN_CONFIDENCE && !m.vector).map(|m| m.rot));
         if q != 0 {
             let low: Vec<usize> = (0..n).filter(|&i| metas[i].conf < OSD_OWN_MIN_CONFIDENCE).collect();
             let redo = par_pages(&data, n, |p, i| if low.contains(&i) { Some(measure(p, i, &cfg, Some(q))) } else { None });
@@ -378,10 +379,14 @@ fn load(page: &Page, cfg: &Cfg, rot: u32) -> Img {
 /// downsampled to the analysis dpi, results scaled back to output pixels.
 fn measure(page: &Page, i: usize, cfg: &Cfg, force_rot: Option<u32>) -> Meta {
     let t0 = Instant::now();
-    let (g, _) = page_gray(page, cfg.dpi, false);
+    let (g, kind) = page_gray(page, cfg.dpi, false);
+    // #107: both detectors read how a scan looks. A page with visible vector text is upright by construction (the PDF's own
+    // /Rotate is applied by the renderer) and a wide one is a table or a sheet, not two facing pages: neither is guessed.
+    // A forced --split N% still applies.
+    let vector = kind == "vector";
     let mut g = Img { w: g.w as usize, h: g.h as usize, px: g.px.iter().map(|&v| v as f32 / 255.0).collect() };
     let mut conf = 1.0;
-    let rot = match (cfg.rotate, cfg.tess, force_rot) {
+    let rot = match (cfg.rotate && !vector, cfg.tess, force_rot) {
         (false, _, _) => 0,
         (_, _, Some(q)) => q,
         (true, true, _) => osd(&g),
@@ -406,7 +411,8 @@ fn measure(page: &Page, i: usize, cfg: &Cfg, force_rot: Option<u32>) -> Meta {
     let ink: Vec<bool> = flat.px.iter().map(|&v| v <= 0.6).collect();
     let (w, h) = (g.w as i64, g.h as i64);
     let kk = k as i64;
-    let mut m = Meta { rot, conf, angle, w, cand: w as f64 / h as f64 >= DOUBLE_AR_MIN, ..Default::default() };
+    let wide = w as f64 / h as f64 >= DOUBLE_AR_MIN;
+    let mut m = Meta { rot, conf, angle, w, cand: wide && !(vector && cfg.split == Split::Auto), vector, ..Default::default() };
     let mut bx = (0, flat.w);
     let (fw, fh) = (flat.w, flat.h);
     if cfg.crop || cfg.split != Split::Off {
@@ -1131,7 +1137,8 @@ fn die(msg: &str) -> ! {
 
 /// The page as 8-bit gray at `dpi`, pixel size rounded up like pdftoppm. A page that is nothing
 /// but one raster image filling the page at (nearly) this resolution is decoded directly;
-/// anything else is rendered.
+/// anything else is rendered. The second value is the source: "image" (decoded directly), "vector" (rendered, with visible
+/// text: a born-digital page, #107) or "render" (rendered, anything else, e.g. a scan with an OCR layer).
 fn page_gray(page: &Page, dpi: f32, smooth: bool) -> (Gray, &'static str) {
     let (pw, ph) = page.render_dimensions();
     let s = dpi / 72.0;
@@ -1139,7 +1146,7 @@ fn page_gray(page: &Page, dpi: f32, smooth: bool) -> (Gray, &'static str) {
     let init = Affine::scale_non_uniform(w as f64 / pw as f64, h as f64 / ph as f64) * page.initial_transform(true).to_kurbo();
 
     let settings = InterpreterSettings::default();
-    let mut probe = Probe { w, h, smooth, other: false, images: 0, got: None };
+    let mut probe = Probe { w, h, smooth, other: false, text: false, images: 0, got: None };
     let ic = InterpreterCache::new();
     let mut ctx = Context::new(init, Rect::new(0.0, 0.0, w as f64, h as f64), &ic, page.xref(), settings.clone());
     interpret_page(page, &mut ctx, &mut probe);
@@ -1151,7 +1158,7 @@ fn page_gray(page: &Page, dpi: f32, smooth: bool) -> (Gray, &'static str) {
     let pix = render(page, &RenderCache::new(), &settings, &rs);
     // Background is opaque white, so premultiplied == straight RGB. Rec.601 luma like poppler's -gray.
     let px = pix.data().iter().map(|p| ((p.r as u32 * 299 + p.g as u32 * 587 + p.b as u32 * 114 + 500) / 1000) as u8).collect();
-    (Gray { w, h, px }, "render")
+    (Gray { w, h, px }, if probe.text { "vector" } else { "render" })
 }
 
 /// An 8-bit RGB raster, 3 bytes per pixel.
@@ -1180,6 +1187,7 @@ struct Probe {
     h: u32,
     smooth: bool,
     other: bool,
+    text: bool, // visible text was drawn: the page is born digital, not a scan (invisible OCR text does not count)
     images: u32,
     got: Option<Gray>,
 }
@@ -1196,7 +1204,7 @@ impl<'a> Device<'a> for Probe {
     fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'a>>, _: BlendMode) {}
     fn draw_glyph(&mut self, _: &Glyph<'a>, _: Affine, _: Affine, _: &Paint<'a>, m: &GlyphDrawMode) {
         // ponytail: invisible OCR text (Tr 3) on a scan still counts as "other"; allow it when a real OCR'd scan needs it
-        let _ = m;
+        self.text |= !matches!(m, GlyphDrawMode::Invisible);
         self.other = true;
     }
     fn draw_image(&mut self, image: Image<'a, '_>, t: Affine) {
@@ -2087,6 +2095,91 @@ mod tests {
         let (g, src) = page_gray(page, dpi, true);
         assert_eq!((src, g.w, g.h), ("image", w, h));
         assert!(g.px.iter().zip(&bits).all(|(&p, &b)| (p < 128) == b));
+    }
+
+    fn test_cfg(rotate: bool, split: Split, dpi: f32) -> Cfg {
+        Cfg {
+            rotate, crop: true, deskew: false, split, thresh: 60.0, dpi, adpi: f32::MAX, slot_flat: false, deskew_first: false,
+            ink_gutter: false, keep_d: 4.0, whitened: false, timing: false, tess: false, colour: vec![], colour_all: false,
+        }
+    }
+
+    /// One landscape A4 page of Helvetica text in two columns with a narrow gap: the shape of a spread, but born digital.
+    fn vector_two_column_pdf() -> Vec<u8> {
+        use pdf_writer::{Content, Name, Pdf, Rect, Ref, Str};
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2)).kids([Ref::new(3)]).count(1);
+        let mut page = pdf.page(Ref::new(3));
+        page.parent(Ref::new(2)).media_box(Rect::new(0.0, 0.0, 842.0, 595.0)).contents(Ref::new(5));
+        page.resources().fonts().pair(Name(b"F1"), Ref::new(4));
+        drop(page);
+        pdf.type1_font(Ref::new(4)).base_font(Name(b"Helvetica"));
+        let mut c = Content::new();
+        c.begin_text().set_font(Name(b"F1"), 10.0);
+        for x in [60.0f32, 440.0] {
+            for line in 0..40 {
+                c.set_text_matrix([1.0, 0.0, 0.0, 1.0, x, 540.0 - 12.0 * line as f32]);
+                c.show(Str(b"The quick brown fox jumps over the lazy dog and runs on and on for a while"));
+            }
+        }
+        c.end_text();
+        pdf.stream(Ref::new(5), &c.finish());
+        pdf.finish()
+    }
+
+    // #107: a born-digital landscape page with two text columns is not a spread, and its turn is not guessed. The same
+    // shape as a bitmap (a scan) still is: candidate and a gutter. A forced --split N% still applies to the digital page.
+    #[test]
+    fn born_digital_page_is_not_turned_or_split() {
+        let dpi = 100.0;
+        let doc = Pdf::new(Arc::new(vector_two_column_pdf())).unwrap();
+        let (_, kind) = page_gray(&doc.pages()[0], dpi, false);
+        assert_eq!(kind, "vector");
+        let m = measure(&doc.pages()[0], 0, &test_cfg(true, Split::Auto, dpi), None);
+        assert!(m.vector && !m.cand && m.gutter.is_none() && m.rot == 0 && m.conf == 1.0, "digital: cand {} gutter {:?}", m.cand, m.gutter);
+        let m = measure(&doc.pages()[0], 0, &test_cfg(false, Split::Fixed(50.0), dpi), None);
+        assert!(m.cand && m.gutter.is_some(), "a forced split still applies");
+
+        let (w, h) = (1170u32, 827u32); // 842 x 595 pt at 100 dpi
+        let bits: Vec<bool> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let text = (84..560).contains(&x) || (610..1100).contains(&x);
+                text && (60..770).contains(&y) && ((x * y) % 7 == 0 || (x + 2 * y) % 13 < 3)
+            })
+            .collect();
+        let scan = Pdf::new(Arc::new(write_pdf(&[(w, h, encode_g4(&bits, w))], dpi))).unwrap();
+        let m = measure(&scan.pages()[0], 0, &test_cfg(false, Split::Auto, dpi), None);
+        assert!(!m.vector && m.cand && m.gutter.is_some(), "scan: cand {} gutter {:?}", m.cand, m.gutter);
+    }
+
+    // #107: a scan with an OCR text layer (invisible text) is still a scan: it must not be taken for a born-digital page.
+    #[test]
+    fn ocr_layer_on_a_scan_is_not_vector() {
+        use pdf_writer::types::TextRenderingMode;
+        use pdf_writer::{Content, Name, Pdf as Writer, Rect, Ref, Str};
+        let mut pdf = Writer::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2)).kids([Ref::new(3)]).count(1);
+        let mut page = pdf.page(Ref::new(3));
+        page.parent(Ref::new(2)).media_box(Rect::new(0.0, 0.0, 200.0, 100.0)).contents(Ref::new(6));
+        page.resources().x_objects().pair(Name(b"Im0"), Ref::new(5));
+        page.resources().fonts().pair(Name(b"F1"), Ref::new(4));
+        drop(page);
+        pdf.type1_font(Ref::new(4)).base_font(Name(b"Helvetica"));
+        let gray = vec![200u8; 200 * 100];
+        let mut img = pdf.image_xobject(Ref::new(5), &gray);
+        img.width(200).height(100).bits_per_component(8);
+        img.color_space().device_gray();
+        drop(img);
+        let mut c = Content::new();
+        c.save_state().transform([200.0, 0.0, 0.0, 100.0, 0.0, 0.0]).x_object(Name(b"Im0")).restore_state();
+        c.begin_text().set_font(Name(b"F1"), 10.0).set_text_rendering_mode(TextRenderingMode::Invisible);
+        c.set_text_matrix([1.0, 0.0, 0.0, 1.0, 20.0, 50.0]).show(Str(b"hidden ocr text")).end_text();
+        pdf.stream(Ref::new(6), &c.finish());
+        let doc = Pdf::new(Arc::new(pdf.finish())).unwrap();
+        assert_eq!(page_gray(&doc.pages()[0], 72.0, false).1, "render");
     }
 
     // #76: the list syntax, the list printed back, and a colour page that keeps the text canvas' page size and aspect.
