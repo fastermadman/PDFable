@@ -1,5 +1,5 @@
 on open theFiles
-	set script_path to (POSIX path of (path to me)) & "Contents/Resources/bitonalpdf.sh"
+	set script_path to (POSIX path of (path to me)) & "Contents/Resources/bitonalpdf"
 	set env to "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin; "
 	set textChoice to "Pure text (1-bit, smallest)"
 	set valg to choose from list {textChoice, "With pictures/diagrams (colour)"} with title "bitonalPDF" with prompt "What kind of PDF?" default items {textChoice}
@@ -24,7 +24,7 @@ on open theFiles
 		set p to POSIX path of f
 		if p ends with ".pdf" then
 			try
-				set total to (do shell script env & "pdfinfo " & quoted form of p & " | awk '/^Pages:/ {print $2}'") as integer
+				set total to (do shell script env & quoted form of script_path & " --page-count " & quoted form of p) as integer
 				set pf to do shell script "mktemp"
 				set resf to do shell script "mktemp"
 				set codef to do shell script "mktemp"

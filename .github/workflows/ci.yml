@@ -14,7 +14,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y poppler-utils tesseract-ocr shellcheck
@@ -28,10 +28,14 @@ jobs:
       - run: shellcheck -e SC1090,SC2153 bitonalpdf.sh build.sh tests/smoke.sh tests/real.sh tests/synth.sh tests/measure.sh
       - run: tests/smoke.sh
       - run: tests/synth.sh
+      # the Rust binary is what the app ships; same CLI, so the same tests run against it
+      - run: cargo build --release --manifest-path rust/Cargo.toml
+      - run: BIN=rust/target/release/bitonalpdf tests/smoke.sh
+      - run: BIN=rust/target/release/bitonalpdf tests/synth.sh
 
   build:
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - run: ./build.sh
