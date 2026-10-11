@@ -23,12 +23,16 @@ for born-digital PDFs.
 
 macOS only. Needs [Homebrew](https://brew.sh) packages:
 
+The app runs one self-contained program (`rust/`), so nothing from Homebrew is needed to use it. Building it
+needs [Rust](https://rustup.rs):
+
 ```bash
-brew install poppler imagemagick
-brew install tesseract         # optional, only needed for --rotate
 git clone https://github.com/FasterMadman/bitonalPDF && cd bitonalPDF
-./build.sh            # builds bitonalPDF.app; drag it to ~/Applications
+./build.sh            # builds the program and bitonalPDF.app; drag it to ~/Applications
 ```
+
+The older shell script `bitonalpdf.sh` (needs `brew install poppler imagemagick`, plus `tesseract` for
+`--rotate`) is kept for comparison for now; the app no longer uses it.
 
 The app is not notarised, so macOS asks for confirmation the first time (right-click → Open).
 
@@ -41,9 +45,11 @@ preprocessing you want, follow the progress bar in the Dock. The result lands ne
 **Terminal:**
 
 ```bash
-./bitonalpdf.sh scan.pdf                    # text mode
-MODE=images ./bitonalpdf.sh book.pdf        # colour mode
-./bitonalpdf.sh scan.pdf out.pdf 65         # bolder text (threshold %, default 60)
+B=rust/target/release/bitonalpdf            # after ./build.sh (or cargo build --release in rust/)
+$B scan.pdf                                 # text mode
+MODE=images $B book.pdf                     # colour mode (same as --colour-pages all)
+$B --colour-pages 3,7b scan.pdf             # text mode, but page 3 and the right half of page 7 in colour
+$B scan.pdf out.pdf 65                      # bolder text (threshold %, default 60)
 ```
 
 ### Preprocessing (rotate, crop, split, deskew)
@@ -53,12 +59,12 @@ downstream (OCR, text extraction). These are opt-in flags, applied per page in t
 **rotate → crop → split → deskew** — before the threshold step above:
 
 ```bash
-./bitonalpdf.sh --rotate --crop --split auto --deskew reading-list.pdf
+$B --rotate --crop --split auto --deskew reading-list.pdf
 ```
 
 | Flag | What it does |
 |---|---|
-| `--rotate` | Detects pages lying on their side or upside down (Tesseract OSD) and rotates them upright. Needs `tesseract`; skipped with a warning if it's not installed, or if a page has too little text to read its orientation. |
+| `--rotate` | Detects pages lying on their side or upside down and rotates them upright (built in; the shell script uses Tesseract). A page the detector is unsure of follows the rest of the document. |
 | `--crop` | Trims scanner/microfilm borders. Trims each page to its text block (dark scanner borders are ignored), then centres every page on a canvas the size of the largest text block, so all pages come out the same size. |
 | `--split auto\|off\|N%` | Cuts two-page spreads into separate pages. `auto` detects double pages and the gutter (spine) position per page, using the document-wide median as a fallback for pages it isn't sure about. `N%` (e.g. `--split 52%`) skips detection and forces the gutter at that position on every double-shaped page — use it when `auto` gets a document wrong. Default `off`. |
 | `--deskew` | Straightens each resulting page (small-angle rotation), after splitting. |

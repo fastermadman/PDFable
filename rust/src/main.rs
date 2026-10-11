@@ -1,6 +1,8 @@
 // bitonalPDF Rust spike (#28 PDF I/O, #29 image ops): PDF in (embedded page image or render) -> rotate/crop/split/
 // deskew -> 1-bit -> CCITT G4 PDF out. Same CLI as bitonalpdf.sh (text mode):
-//   bitonalpdf [--rotate] [--crop] [--split auto|off|N%] [--deskew] [--colour-pages LIST|none] input.pdf [output.pdf] [threshold%=60] [dpi=300]
+//   bitonalpdf [--rotate] [--crop] [--split auto|off|N%] [--deskew] [--colour-pages LIST|all|none] input.pdf [output.pdf] [threshold%=60] [dpi=300]
+// MODE=images (as bitonalpdf.sh) = --colour-pages all: every page colour JPEG, default output <input>.shrunk.pdf.
+// PROGRESS_FILE=<path>: one line per finished page is appended (droplet). --page-count input.pdf prints the page count.
 // BITONAL_TIMING=1 prints per-page geometry and stage times (ms) to stderr; BITONAL_RENDER=1 always renders.
 // A/B knobs for the pipeline-order questions of #29 (docs/rust-port.md section 2):
 //   BITONAL_ADPI=<dpi>      analysis (crop/gutter) resolution, default = dpi (150 flips crop decisions, section 2)
@@ -28,6 +30,7 @@ use hayro::hayro_interpret::{
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{RenderCache, RenderSettings, render};
 use kurbo::{Affine, BezPath, Rect};
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -130,6 +133,7 @@ struct Cfg {
     timing: bool,
     tess: bool, // BITONAL_OSD=tesseract: the old detector
     colour: Vec<(usize, Option<usize>)>, // #76 --colour-pages: input page (0-based), slot (None = all slots)
+    colour_all: bool, // --colour-pages all / MODE=images: every slot a JPEG page, and the "not smaller" gate applies
 }
 
 /// Pass A result for one page, in output-dpi pixels (after the quarter-turn `rot`, and after straightening by
@@ -180,7 +184,14 @@ fn main() {
         timing: env("BITONAL_TIMING"),
         tess: std::env::var("BITONAL_OSD").as_deref() == Ok("tesseract"),
         colour: vec![],
+        colour_all: false,
     };
+    match std::env::var("MODE").as_deref() {
+        Ok("images") => cfg.colour_all = true,
+        Ok("text") | Err(_) => {}
+        Ok(m) => die(&format!("MODE must be text or images, not {m}")),
+    }
+    let mut count = false;
     let mut pos = vec![];
     let mut eval = false;
     let mut detect = false;
@@ -202,7 +213,12 @@ fn main() {
                     _ => die("--split auto|off|N%"),
                 }
             }
-            "--colour-pages" => cfg.colour = parse_colour_pages(it.next().map(String::as_str).unwrap_or_else(|| die("--colour-pages LIST|none"))),
+            "--colour-pages" => match it.next().map(String::as_str) {
+                Some("all") => (cfg.colour, cfg.colour_all) = (vec![], true),
+                Some(l) => (cfg.colour, cfg.colour_all) = (parse_colour_pages(l), false),
+                None => die("--colour-pages LIST|all|none"),
+            },
+            "--page-count" => count = true,
             s if s.starts_with("--") => die(&format!("{s}: unknown option")),
             _ => pos.push(a.clone()),
         }
@@ -210,8 +226,9 @@ fn main() {
     if detect {
         return detect_eval(&pos);
     }
-    let input = pos.first().unwrap_or_else(|| die("usage: bitonalpdf [--rotate] [--crop] [--split auto|off|N%] [--deskew] [--colour-pages LIST|none] input.pdf [output.pdf] [threshold%] [dpi]"));
-    let output = pos.get(1).cloned().unwrap_or_else(|| format!("{}.1bit.pdf", input.trim_end_matches(".pdf")));
+    let input = pos.first().unwrap_or_else(|| die("usage: bitonalpdf [--rotate] [--crop] [--split auto|off|N%] [--deskew] [--colour-pages LIST|all|none] input.pdf [output.pdf] [threshold%] [dpi]"));
+    let suffix = if cfg.colour_all { "shrunk" } else { "1bit" };
+    let output = pos.get(1).cloned().unwrap_or_else(|| format!("{}.{suffix}.pdf", input.trim_end_matches(".pdf")));
     cfg.thresh = pos.get(2).map_or(60.0, |s| s.parse().unwrap_or_else(|_| die("bad threshold")));
     cfg.dpi = pos.get(3).map_or(300.0, |s| s.parse().unwrap_or_else(|_| die("bad dpi")));
     cfg.adpi = cfg.adpi.min(cfg.dpi);
@@ -225,6 +242,9 @@ fn main() {
 
     let data = Arc::new(std::fs::read(input).unwrap_or_else(|e| die(&format!("{input}: {e}"))));
     let n = Pdf::new(data.clone()).unwrap_or_else(|e| die(&format!("{input}: {e:?}"))).pages().len();
+    if count {
+        return println!("{n}");
+    }
     if eval {
         return osd_eval(&data, n);
     }
@@ -268,7 +288,7 @@ fn main() {
 
     // Pass B: cut, deskew, centre on the canvas, flatten + threshold, G4.
     // #76: which slots of which page are colour pages (the text pass still runs on them: the canvas comes from all slots)
-    let want = |i: usize, slot: usize| cfg.colour.iter().any(|&(p, s)| p == i && s.is_none_or(|s| s == slot));
+    let want = |i: usize, slot: usize| cfg.colour_all || cfg.colour.iter().any(|&(p, s)| p == i && s.is_none_or(|s| s == slot));
     let nslots = |p: &Plan| if matches!(p, Plan::Split(..)) { 2 } else { 1 };
     let col: Vec<[bool; 2]> = (0..n).map(|i| [want(i, 0), nslots(&plans[i]) > 1 && want(i, 1)]).collect();
     for &(p, s) in &cfg.colour {
@@ -277,8 +297,20 @@ fn main() {
         }
     }
     eprintln!("colour pages: {}", colour_list(&col, &plans));
-    let (slots, colour): (Vec<(u32, u32, Vec<u8>, [usize; 2])>, Vec<Option<Rgb>>) =
-        par_pages(&data, n, |p, i| finish(p, i, &metas[i], plans[i], (tw, th), col[i], &cfg)).into_iter().flatten().unzip();
+    // PROGRESS_FILE (droplet): one line per finished page, as bitonalpdf.sh writes it
+    let progress = std::env::var_os("PROGRESS_FILE").map(|f| {
+        std::sync::Mutex::new(std::fs::OpenOptions::new().append(true).create(true).open(f).unwrap_or_else(|e| die(&format!("PROGRESS_FILE: {e}"))))
+    });
+    let (slots, colour): (Vec<(u32, u32, Vec<u8>, [usize; 2])>, Vec<Option<Rgb>>) = par_pages(&data, n, |p, i| {
+        let r = finish(p, i, &metas[i], plans[i], (tw, th), col[i], &cfg);
+        if let Some(f) = &progress {
+            let _ = writeln!(f.lock().unwrap(), "{}", i + 1);
+        }
+        r
+    })
+    .into_iter()
+    .flatten()
+    .unzip();
     let pages: Vec<(u32, u32, Vec<u8>)> =
         if cfg.crop { compose(slots) } else { slots.into_iter().map(|(w, h, g, _)| (w, h, g)).collect() };
     let t2 = Instant::now();
