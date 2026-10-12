@@ -8,14 +8,14 @@ Usage: tests/codec-table.py crop.png [crop2.png ...]   (300-dpi PNG crops of the
                                                          stencil /Mask at a different resolution, checked pixel-by-pixel
                                                          in every viewer found)
 Needs: magick, cwebp/dwebp, opj_compress/opj_decompress, avifenc, img2pdf, numpy, Pillow; viewers: pdftoppm, gs,
-qlmanage (macOS PDFKit); the mixed rows also need rust/target/release/bitonalpdf (build with cargo build --release).
+qlmanage (macOS PDFKit); the mixed rows also need rust/target/release/pdfable (build with cargo build --release).
 The crops are not committed (they come from copyrighted scans); see docs/rust-port.md section 4 for how they were cut.
 """
 import glob, os, subprocess, sys, tempfile, time, shutil, zlib
 import numpy as np
 from PIL import Image
 
-BITONALPDF = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'rust', 'target', 'release', 'bitonalpdf')
+PDFABLE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'rust', 'target', 'release', 'pdfable')
 
 def run(*a, **k):
     return subprocess.run(a, capture_output=True, text=True, **k)
@@ -79,7 +79,7 @@ def save_dir(crop):
     return d
 
 def mixed_rows(c, base, png, t):
-    """Mixed/MRC-lite rows for #38: bitonalpdf.sh MODE=images' own JPEG setting (1-2), the real 1-bit text-mode
+    """Mixed/MRC-lite rows for #38: pdfable.sh MODE=images' own JPEG setting (1-2), the real 1-bit text-mode
     pipeline (3), and two mask-based composites built on top of it (4-5). Same crop c, same tmpdir t as the CODECS loop."""
     w, h = map(int, run('magick', 'identify', '-format', '%wx%h', c).stdout.split('x'))
     out_dir = save_dir(c)
@@ -94,11 +94,11 @@ def mixed_rows(c, base, png, t):
         b = os.path.getsize(jpg)
         print(f'{base}\tJPEG q{q} 150 dpi 4:2:0\t{b}\t{b / png:.3f}\t{dt:.2f}\t{metric(c, d, "PSNR"):.2f}\t{metric(c, d, "SSIM"):.4f}')
 
-    # 3: the real pipeline. img2pdf embeds the PNG losslessly; bitonalpdf re-encodes it to 1-bit CCITT G4.
+    # 3: the real pipeline. img2pdf embeds the PNG losslessly; pdfable re-encodes it to 1-bit CCITT G4.
     in_pdf, out_pdf = os.path.join(t, 'in.pdf'), os.path.join(t, 'out.pdf')
     t0 = time.time()
     run('img2pdf', '--imgsize', '300dpi', '-o', in_pdf, c)
-    run(BITONALPDF, in_pdf, out_pdf)
+    run(PDFABLE, in_pdf, out_pdf)
     dt = time.time() - t0
     g4_bytes = g4_png = None
     if os.path.exists(out_pdf):
@@ -115,7 +115,7 @@ def mixed_rows(c, base, png, t):
                 print(f'# {base}: G4 decode {pw}x{ph} != crop {w}x{h}, resized with -filter point', file=sys.stderr)
                 g4_png = fixed
     if g4_bytes is None:
-        print(f'{base}\t1-bit text mode (G4)\tFAILED\t\t\t\tbitonalpdf produced no usable output'); return
+        print(f'{base}\t1-bit text mode (G4)\tFAILED\t\t\t\tpdfable produced no usable output'); return
     shutil.copy(g4_png, os.path.join(out_dir, f'{base}-3.png'))
     print(f'{base}\t1-bit text mode (G4)\t{g4_bytes}\t{g4_bytes / png:.3f}\t{dt:.2f}\t{metric(c, g4_png, "PSNR"):.2f}\t{metric(c, g4_png, "SSIM"):.4f}')
 
@@ -281,7 +281,7 @@ def mrc_viewers():
                 got = _px(im, row, col)
                 ok = all(abs(g - e) <= 30 for g, e in zip(got, exp))
                 print(f'{page}\t{viewer}\t{name}\t{exp}\t{got}\t{"ok" if ok else "FAIL"}')
-    print('rust/target/release/bitonalpdf has no render-to-PNG CLI; skipped (not adding one per the task).')
+    print('rust/target/release/pdfable has no render-to-PNG CLI; skipped (not adding one per the task).')
 
 if __name__ == '__main__':
     if sys.argv[1] == '--viewers':

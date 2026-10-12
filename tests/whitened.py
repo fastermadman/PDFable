@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Review list for BITONAL_WHITENED=1 (#63): reads the stderr TSV of `bitonalpdf --crop` (files or stdin). Shows rows that
+"""Review list for PDFABLE_WHITENED=1 (#63): reads the stderr TSV of `pdfable --crop` (files or stdin). Shows rows that
 are frame / edge+big / rule (keep_box's deliberate big removals) or letter-sized (letters >= 1) and outside the text block.
 First a per-page line (rows, largest l, largest first), then the rows: header/footer zone first, then by size.
-Usage: BITONAL_WHITENED=1 bitonalpdf --crop in.pdf out.pdf 2>&1 >/dev/null | tests/whitened.py      or   tests/whitened.py log1 log2"""
+Usage: PDFABLE_WHITENED=1 pdfable --crop in.pdf out.pdf 2>&1 >/dev/null | tests/whitened.py      or   tests/whitened.py log1 log2"""
 import sys
 ZONE = 0.10  # top/bottom share of the slot height that counts as header/footer zone
 BIG = {"frame", "edge+big", "rule"}

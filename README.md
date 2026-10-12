@@ -1,6 +1,8 @@
-<p align="center"><img src="assets/logo.svg" alt="bitonalPDF" width="360"></p>
+<p align="center"><img src="assets/logo.svg" alt="PDFable" width="360"></p>
 
-# bitonalPDF
+# PDFable
+
+Formerly bitonalPDF (the repository URL still has the old name).
 
 Shrink scanned PDFs on macOS without hurting the text. A 59 MB, 166-page book scan became 9 MB and
 stayed fully readable. Preview's Quartz filters and Compressor often make such files *bigger*; this
@@ -28,24 +30,24 @@ needs [Rust](https://rustup.rs):
 
 ```bash
 git clone https://github.com/FasterMadman/bitonalPDF && cd bitonalPDF
-./build.sh            # builds the program and bitonalPDF.app; drag it to ~/Applications
+./build.sh            # builds the program and PDFable.app; drag it to ~/Applications
 ```
 
-The older shell script `bitonalpdf.sh` (needs `brew install poppler imagemagick`, plus `tesseract` for
+The older shell script `pdfable.sh` (needs `brew install poppler imagemagick`, plus `tesseract` for
 `--rotate`) is kept for comparison for now; the app no longer uses it.
 
 The app is not notarised, so macOS asks for confirmation the first time (right-click → Open).
 
 ## Use
 
-**Droplet:** drop one or more PDFs on `bitonalPDF.app`, choose *Pure text* or *With pictures*, tick any
+**Droplet:** drop one or more PDFs on `PDFable.app`, choose *Pure text* or *With pictures*, tick any
 preprocessing you want, follow the progress bar in the Dock. The result lands next to the original as
 `<name>.1bit.pdf` or `<name>.shrunk.pdf`. The original is never touched.
 
 **Terminal:**
 
 ```bash
-B=rust/target/release/bitonalpdf            # after ./build.sh (or cargo build --release in rust/)
+B=rust/target/release/pdfable            # after ./build.sh (or cargo build --release in rust/)
 $B scan.pdf                                 # text mode
 MODE=images $B book.pdf                     # colour mode (same as --colour-pages all)
 $B --colour-pages 3,7b scan.pdf             # text mode, but page 3 and the right half of page 7 in colour

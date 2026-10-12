@@ -2,7 +2,7 @@
 """Number of ink colours and flat-vs-continuous colour per page and per labelled box (#74, docs/rust-port.md section 5.9 item 2).
 
 Usage: tests/ink-colours.py det.tsv <folder with X.pdf, X.labels> geom.txt
-  det.tsv   `bitonalpdf --detect-eval` output (page size at 300 dpi, RGB source = page hasler > 0)
+  det.tsv   `pdfable --detect-eval` output (page size at 300 dpi, RGB source = page hasler > 0)
   geom.txt  pass-A lines as for tests/mixed-eval.py (the crop box; page signals are taken inside it, 4.5's surround problem)
 Renders every page at 150 dpi to <folder>/work/m3/r150/ (git-ignored, same files as mixed-eval.py --sizes); prints numbers only.
 

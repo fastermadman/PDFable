@@ -1,10 +1,10 @@
 #!/bin/bash
 # Smoke test: a synthetic 2-page noisy "scan" must shrink in both modes and keep its page count.
 # Runs at low dpi on purpose: CI is on macOS, where minutes are expensive.
-# Usage: [BIN=path/to/implementation] tests/smoke.sh   (default BIN: bitonalpdf.sh; the Rust binary takes the same CLI)
+# Usage: [BIN=path/to/implementation] tests/smoke.sh   (default BIN: pdfable.sh; the Rust binary takes the same CLI)
 set -euo pipefail
 cd "$(dirname "$0")/.."
-BIN=${BIN:-./bitonalpdf.sh}
+BIN=${BIN:-./pdfable.sh}
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 for i in 1 2; do
   magick -size 620x877 plasma:fractal -colorspace Gray "$T/s$i.png"

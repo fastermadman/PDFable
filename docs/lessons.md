@@ -1,6 +1,6 @@
 # What we tried, what works, what doesn't
 
-Living log of the `--rotate/--crop/--split/--deskew` pipeline in `bitonalpdf.sh`. It records
+Living log of the `--rotate/--crop/--split/--deskew` pipeline in `pdfable.sh`. It records
 **measured** results only; anything guessed is marked *(unverified)*. Real scans are copyrighted and
 stay in the git-ignored `tests/real/`; findings about them are written down here instead.
 
@@ -112,7 +112,7 @@ page, and whether there is ink in the bottom 12 % (footer/page number). Two cons
   (`FACT_TOL`), footer flag equal, page count equal. `--record` writes them (do it only after looking at
   `out/`), `ONLY=<name>` runs one scan, `BIN=<script>` runs another implementation. A changed fact fails:
   flipping the footer flag of `ryg-side` page 1 gave `FAIL facts differ: page 1: footer ink 1 (expected 0)`.
-- `tests/synth.sh` builds fixtures from rectangles/speckle (no fonts), runs `BIN` (default `bitonalpdf.sh`),
+- `tests/synth.sh` builds fixtures from rectangles/speckle (no fonts), runs `BIN` (default `pdfable.sh`),
   measures, prints one row per case: PASS / FAIL / KNOWN-FAIL / XPASS (XPASS fails the run so a fixed
   defect gets moved out of the known list). It runs in CI after `smoke.sh`.
 
@@ -289,6 +289,6 @@ Very likely yes, with caveats; none of this has been spiked yet *(unverified)*:
   means shipping `pdfium.dll` next to the exe.
 - `--rotate` uses Tesseract OSD; on Windows Tesseract is a separate install, so keep it optional (as on
   macOS) or replace it with an own orientation heuristic (done in the spike, #30).
-- The droplet (`bitonalPDF.app`, AppleScript) is macOS only. Windows needs its own front end: drag-and-drop
+- The droplet (`PDFable.app`, AppleScript) is macOS only. Windows needs its own front end: drag-and-drop
   onto the `.exe`, a shortcut, or a small GUI.
 - CI: add a `windows-latest` job running `smoke` for the Rust binary; keep bash-specific tests out of it.

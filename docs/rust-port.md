@@ -1,12 +1,12 @@
 # Rust port: decisions and measurements
 
 Spike code: `rust/` (one file, `src/main.rs`). Build: `cd rust && cargo build --release`; the binary takes the
-`bitonalpdf.sh` CLI, so `BIN=rust/target/release/bitonalpdf tests/synth.sh` works. Text mode only (no `MODE=images`).
+`pdfable.sh` CLI, so `BIN=rust/target/release/pdfable tests/synth.sh` works. Text mode only (no `MODE=images`).
 Since #29 it does `--rotate` (Tesseract, as in bash; since #30 an own detector by default, section 3), `--crop`, `--split auto|off|N%` and `--deskew`.
-`BITONAL_TIMING=1` prints per-page geometry and stage times, `BITONAL_RENDER=1` forces the render path; the A/B knobs of
+`PDFABLE_TIMING=1` prints per-page geometry and stage times, `PDFABLE_RENDER=1` forces the render path; the A/B knobs of
 section 2 are listed at the top of `main.rs`.
 
-All numbers: Apple M4 (10 cores), macOS, release build, the six local scans in `tests/real/`. Bash = `bitonalpdf.sh`
+All numbers: Apple M4 (10 cores), macOS, release build, the six local scans in `tests/real/`. Bash = `pdfable.sh`
 **without flags** (same work as the spike: render → flatten → hysteresis threshold → G4), ImageMagick 7.1.2, poppler.
 
 ## 1. PDF layers (#28)
@@ -124,7 +124,7 @@ pdf-writer (PDF)**.
 ## 2. Image ops and pipeline order (#29)
 
 ### What was built
-All of `bitonalpdf.sh` text mode is ported in `rust/src/main.rs`, with **no new crates**: every op is plain Rust over a
+All of `pdfable.sh` text mode is ported in `rust/src/main.rs`, with **no new crates**: every op is plain Rust over a
 `Vec<f32>` page (0 = black … 1 = white).
 
 | Op | How | Bash equivalent |
@@ -286,7 +286,7 @@ bash), −0.2 … −4.2 % size, 41× less CPU for the image work. Tesseract OSD
 
 ### Result
 `--rotate` in the spike now uses its own detector (`osd_own` in `main.rs`, ~60 lines, no new crate, no system
-dependency). `BITONAL_OSD=tesseract` brings back the old Tesseract call (kept as a fallback and for the comparison
+dependency). `PDFABLE_OSD=tesseract` brings back the old Tesseract call (kept as a fallback and for the comparison
 below). On the six local scans the output PDFs are **byte-identical** with both detectors (`cmp`), so the parity of
 section 2 (`BIN=… SIZE_TOL=3 tests/real.sh`: same 4 + 4 pages outside tolerance on `skewed`/`sidste`, same `skewed.facts`
 mismatch from #40) is unchanged. `cargo test` has `orientation_found_for_all_turns` (synthetic lines with ascenders and
@@ -304,7 +304,7 @@ squares (equal sample count for rows and columns), central 90 % of the page only
 
 ### Accuracy
 Test set: every page of the six local files (47 pages, `ren pdf` has 5), first turned upright by Tesseract, then
-rotated with `rot90` by 0/90/180/270 → **188 cases**, expected answer = the inverse turn. `bitonalpdf --osd-eval file.pdf`
+rotated with `rot90` by 0/90/180/270 → **188 cases**, expected answer = the inverse turn. `pdfable --osd-eval file.pdf`
 prints one line per case (`EVAL_TESS=1` adds Tesseract's answer and time).
 
 | Detector | correct | notes |
@@ -352,7 +352,7 @@ All numbers: the same 168 cases (without `ren pdf`), before the final design.
    resolution from 1/2 to 1/8. Why was not investigated *(unverified: crisp vector edges make both edges equally sharp)*.
    That it worked on the scans might be a property of scanned edges rather than of the letters, so it was dropped.
    The ascender/descender feature is right on all of them from 1/4 size (at 1/8: 166/168).
-6. **Sensitivity of the final design** (correct of 188, `BITONAL_OSDKA/KD/TILE`):
+6. **Sensitivity of the final design** (correct of 188, `PDFABLE_OSDKA/KD/TILE`):
 
 | axis 1/k, direction 1/k, tile | correct | | axis, dir, tile | correct |
 |---|---:|---|---|---:|
@@ -376,7 +376,7 @@ is the only reason to trust it beyond these 47 pages.
 - **Mixed orientation on one page** (`ren pdf` p2) is unsolved by design: one quarter turn per page.
 - `ocrs` and other OCR crates (idea 4) were **not evaluated**: the hand-made detector was accurate and ~11× faster than
   Tesseract already, and an OCR model would bring a model file and a heavier dependency, against the purpose of #30.
-- Tesseract stays available (`BITONAL_OSD=tesseract`); nothing here retires it for documents outside this suite.
+- Tesseract stays available (`PDFABLE_OSD=tesseract`); nothing here retires it for documents outside this suite.
 
 ### Verdict for #30
 Own detector as the default for `--rotate`: no system dependency, 186/188 on the local suite (misses: one ambiguous
@@ -386,7 +386,7 @@ the numbers: five Latin documents and synthetic 90/180.
 ### Photographed pages (#45)
 Section 4.3 found the detector turning 12 of the 77 upright pages of f1–f7 (photographed spreads, pictures, colour).
 New case set: those 77 pages, truth = as they are (all upright, 4.3), and their `rot90` copies → **308 cases**
-(`EVAL_UPRIGHT=1 bitonalpdf --osd-eval fN.pdf`: the page is taken as upright instead of asking Tesseract). The eval line
+(`EVAL_UPRIGHT=1 pdfable --osd-eval fN.pdf`: the page is taken as upright instead of asking Tesseract). The eval line
 now also prints the two parts of the confidence, `ratio` (axis) and `asym` (direction), so a miss can be assigned to a stage.
 
 **Cause (measured on f7 p5, per tile and per line).** The text tiles gave direction scores of about ±0.1 each; the bottom
@@ -410,7 +410,7 @@ leaves out every line whose smoothed peak is above it. Nothing else changed: sam
 
 **Whole runs** (all four flags, f1–f7): main turns f1 p5/p22, f2 p10/15/16 and f7 p1/2/4–8 (the 12 of 4.3); after the fix no page is
 turned, the page counts are back at the Tesseract baseline (f1 50, f7 18), and **all seven outputs are byte-identical to
-`BITONAL_OSD=tesseract`** (`cmp`). `BIN=… SIZE_TOL=3 tests/real.sh`: same output as main (same two known `skewed`/`sidste` facts
+`PDFABLE_OSD=tesseract`** (`cmp`). `BIN=… SIZE_TOL=3 tests/real.sh`: same output as main (same two known `skewed`/`sidste` facts
 failures), the five written PDFs byte-identical. A page where every tile is too dark for text now returns 0° with confidence 0
 (without the guard 0/0 would give a NaN ratio, which `min(1e3)` turns into full confidence); no page of either suite hits it.
 
@@ -426,7 +426,7 @@ blocks at ~60 % coverage are darker than any text line (0.2–0.3 at 75 dpi) and
 
 What it does not do: on photographed material the detector is now **safe but not useful for real turned pages**:
 of the 231 turned copies, 80 are left as they are (f6 0/12, f7 1/27 right). A photographed book that actually needs turning
-still needs `BITONAL_OSD=tesseract`. The cap also means very dense or bold text (line peak above 0.4 at 75 dpi) no longer votes;
+still needs `PDFABLE_OSD=tesseract`. The cap also means very dense or bold text (line peak above 0.4 at 75 dpi) no longer votes;
 the old suite did not change, but a page of heavy headings could fall back to 0°.
 
 What did not work (all at gate 0.25 or raw, same 188 + 308 cases):
@@ -468,7 +468,7 @@ Reproduce (all outputs land in the ignored folder):
 ```
 cd rust && cargo build --release && cd ..
 D="tests/real/new pdfs dont upload"
-rust/target/release/bitonalpdf --detect-eval "$D"/*.pdf > det.tsv          # 6–7 s wall, byte-identical on a second run
+rust/target/release/pdfable --detect-eval "$D"/*.pdf > det.tsv          # 6–7 s wall, byte-identical on a second run
 python3 tests/detect-join.py det.tsv "$D"                                  # joins with "$D"/<name>.labels, prints the signal tables
 python3 tests/codec-table.py crop.png ...                                  # codec table; --viewers crop.png for the viewer test
 ```
@@ -528,12 +528,12 @@ f3 p1 (box edge of the cover), f4 p1, f5 p7, f6 p4 (sepia print) and f7 8 of 9 p
 ### 4.3 Baseline (task 3)
 All rows: **all four flags** `--rotate --crop --split auto --deskew`, 300 dpi (text) / 150 dpi (images, bash), threshold 60, one run each, machine
 otherwise idle. `text` = the Rust spike (own orientation detector, default), `text + Tess` = the spike with
-`BITONAL_OSD=tesseract` (see the orientation finding below; the corrected baseline), `images` = `MODE=images bitonalpdf.sh` with the same flags.
+`PDFABLE_OSD=tesseract` (see the orientation finding below; the corrected baseline), `images` = `MODE=images pdfable.sh` with the same flags.
 Wall/CPU from `/usr/bin/time -l` (CPU = user + sys; bash: 4 pages at a time, includes Tesseract and ImageMagick children).
 "Sizes" = number of different output page sizes (1 = the `real.sh` check "all pages one size" holds); the page-count check
 is the output count against the number of spreads found, see the notes.
 
-The #40 median correction (see the reference section above) is now merged in `bitonalpdf.sh` (`DOUBLE_GFRAC`), and `skewed.facts` was re-recorded: bash and the numbers below no longer differ by that line.
+The #40 median correction (see the reference section above) is now merged in `pdfable.sh` (`DOUBLE_GFRAC`), and `skewed.facts` was re-recorded: bash and the numbers below no longer differ by that line.
 
 | file | mode | pages in → out | in | out | out / in | sizes | wall | CPU | peak RSS |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
@@ -561,7 +561,7 @@ The #40 median correction (see the reference section above) is now merged in `bi
 
 Sums over the 7 files: input 56.5 MB; text 6.1 MB (0.11), images 22.3 MB (0.39); wall 12.0 s (text) vs 176 s (images), CPU 80 s vs 594 s
 (text with Tesseract OSD: 23.4 s wall, 156 s CPU). Every `real.sh`-style check holds (one page size in every output). The f3 images value
-comes from a scratch copy of `bitonalpdf.sh` with only the "not smaller" test removed (the pipeline itself is untouched); the real script writes nothing there.
+comes from a scratch copy of `pdfable.sh` with only the "not smaller" test removed (the pipeline itself is untouched); the real script writes nothing there.
 **Correction (#38):** the `images` rows carry the bash median bug #40 on f1 and f7 (spread-wide canvas): with the one-line fix, f1 is 8.02 MB and f7 2.56 MB
 (7 % and 14 % smaller), the other five are unchanged, sum 21.25 MB; section 5.6 uses the corrected numbers.
 
@@ -760,19 +760,19 @@ pages or the ±0.03 boxes of 4.2; **[scans]** = all 77 pages are scans of one ow
 source, one labeller). Nothing in the pipeline changed; `rust/src/main.rs` is untouched.
 
 ### 5.0 New measurements
-Reproduce (outputs stay in the ignored folder; `D="tests/real/new pdfs dont upload"`, `W="$D/work"`, `B=rust/target/release/bitonalpdf`):
+Reproduce (outputs stay in the ignored folder; `D="tests/real/new pdfs dont upload"`, `W="$D/work"`, `B=rust/target/release/pdfable`):
 ```
 for s in A:geom B:slots; do for i in 1 2 3 4 5 6 7; do         # pass-A box/gutter and slots per page, prefixed with fN
-  BITONAL_TIMING=1 $B --crop --split auto $W/f$i.pdf /tmp/x.pdf 2>&1 >/dev/null | grep "^${s%:*} page" | sed "s/^${s%:*} page/f$i/"
+  PDFABLE_TIMING=1 $B --crop --split auto $W/f$i.pdf /tmp/x.pdf 2>&1 >/dev/null | grep "^${s%:*} page" | sed "s/^${s%:*} page/f$i/"
 done > $W/m3/${s#*:}.txt; done
-# $W/m3/bitonalpdf-fix40.sh = bitonalpdf.sh + #40's one-line fix - the "not smaller" test; MODE=images, all four flags -> $W/m3/base40/fN.images.pdf
+# $W/m3/pdfable-fix40.sh = pdfable.sh + #40's one-line fix - the "not smaller" test; MODE=images, all four flags -> $W/m3/base40/fN.images.pdf
 python3 tests/mixed-eval.py $W/det.tsv "$D" $W/m3/geom.txt $W/m3/slots.txt $W/base $W/m3/base40 --sizes   # ~70 s, same output twice
 python3 tests/codec-table.py $W/crops/*.png        # now with the rows of 5.2/5.3
 python3 tests/codec-table.py --mrc-viewers         # synthetic PDF, no scan content
 ```
 - **Pass-A geometry without `--rotate`** (all 77 pages are upright, 4.3 item 1), so boxes and labels share one frame; its split plan gives the
   same output page counts as the `text + Tess` and `images` baselines (50/18/17/10/7/8/18).
-- **Images baseline without #40** (`$W/m3/base40`: scratch copy of `bitonalpdf.sh` with #40's verified one-line fix and without the "not
+- **Images baseline without #40** (`$W/m3/base40`: scratch copy of `pdfable.sh` with #40's verified one-line fix and without the "not
   smaller" test): 21.25 MB instead of 22.27 MB (4.3 correction). All sizes below are **image-stream bytes** (`pdfimages -list`, 0.1 kB):
   text 5.93 MB (the files are 6.15 MB), images 20.55 MB; per output page 46.3 kB vs 160.5 kB.
 - `tests/mixed-eval.py`: the four non-text classes pooled into one class `keep` (5.1); cuts chosen **leave-one-file-out** (cut from six files,
@@ -916,7 +916,7 @@ it: perfect regions beat perfect pages by only 5 % (5.4), and no tile cut is bot
 
 Prerequisites before implementing:
 1. ~~**Orientation** (#45)~~: done, 0 of 77 upright pages turned (section 3, "Photographed pages"). Photographed pages that really are
-   turned are mostly left as they are by the own detector; use `BITONAL_OSD=tesseract` for those.
+   turned are mostly left as they are by the own detector; use `PDFABLE_OSD=tesseract` for those.
 2. **Crop box vs pictures** and the dark-table splits (splits fixed in #46; the crop box is still open): the crop cuts 8 of 46 labelled regions by 17–45 %.
 3. **#40** merged, so the bash reference (MODE=images) is right.
 4. **A Rust JPEG page** (the images part of #9, or the first issue below) with the `jpeg-encoder` licence note.
@@ -1045,7 +1045,7 @@ component that tall. The slot size is unchanged (whitening, not cropping, so all
 
 Question: in what order and in how many passes should rotate → crop → split → deskew → align → crop run, so that the dark
 edge between the cut and the text goes away and the text sits at the same place on every page? **Status: the order is
-decided and **the default with `--crop`** (#60, the knob `BITONAL_SLOTBOX` is gone). What to keep is decided per connected
+decided and **the default with `--crop`** (#60, the knob `PDFABLE_SLOTBOX` is gone). What to keep is decided per connected
 component (`keep_box`, v10 below).** It meets the goals; the page number cut off before `keep_box` is fixed by `reach` (#84); the plan box's vertical clip of heads, headings and first/last body lines is fixed by the text test in the band rule (#91; known limits there).
 
 Measured by `runner` (numbers) and looked at by `checker` (pages), all four flags, f1–f7 and `tests/real/`. The scripts
@@ -1092,7 +1092,7 @@ page size. Neither is "what to keep".
 
 ### The keep rule per component (v5–v9, in the code)
 `keep_box` labels the connected components of the cleaned, deskewed slot and decides for each one (l = median letter
-height inside the text block, d = 4 l, `BITONAL_KEEP_D`):
+height inside the text block, d = 4 l, `PDFABLE_KEEP_D`):
 - **seeds:** components that meet the text block (`content_box`, band rule off);
 - **join, repeated until nothing changes:** anything within d of the kept box; anything straight above/below it (inside
   its columns) at any distance if it is more than a speck (l²/8 px): page numbers, running heads, footnotes; a letter-sized
@@ -1204,7 +1204,7 @@ body lines), from the same ring dump, at no extra ring cost. Rule, constants `KE
    `KEEP_LINE_INK` = 80 % of its ink.
 4. **Diacritics:** a pool piece <= 0.5 l tall overlapping a kept line piece in x and within 0.5 l vertically joins (i dots, the
    ring of a; they share no rows with the letter). Without this: "tıng", "ma" for "må".
-5. **Class (logged, not a filter):** `BITONAL_WHITENED=1` prints one `line` row per restored line: page slot x0 y0 x1 y1 class
+5. **Class (logged, not a filter):** `PDFABLE_WHITENED=1` prints one `line` row per restored line: page slot x0 y0 x1 y1 class
    white-rows-in-l `cut`. White rows to the next kept ink towards the block: < 1.25 l body line, 1.25-4 l heading, >= 4 l
    head/footer. `cut` = a pool-excluded edge piece sits on the line within 1.0 l (it runs past the ring).
 
@@ -1297,7 +1297,7 @@ on a cover the text runs off the slot, so it touches the cut. New rule: when **m
 touch a cut side, `edge+big` is off for that slot (a book edge is a few long pieces, content running off is many). Frames
 and rules are unchanged. The 16 was measured on the seven files: 26 on f5 p1, at most 12 anywhere else. It is a rule of
 thumb and can fail on covers with fewer such pieces; those stay whitened. Effect on f1–f7 and `tests/real`: only f5 differs
-from main (`tests/verify.sh`), `BITONAL_WHITENED=1` lists the same rows on all other files. Result on f5 p1, judged by `checker` against the source: date line partly readable (was unreadable), masthead still
+from main (`tests/verify.sh`), `PDFABLE_WHITENED=1` lists the same rows on all other files. Result on f5 p1, judged by `checker` against the source: date line partly readable (was unreadable), masthead still
 unreadable (a few clipped black bars), circle text still missing (that area is white in the output, as in main). So the rule
 lets the pieces through but does not by itself make masthead and circle legible; #66 stays open for that. Not this issue: the
 cover photo is rendered badly by the threshold (identical in main).
@@ -1312,7 +1312,7 @@ the right circle's light-purple fill and its white text are already near-white b
 x ≈ 1615 is where the darker left circle ends and the lighter one starts, so the left circle's text stops there. The cause is
 therefore the flatten (pass B, `BLUR_SIGMA`) plus the threshold, not the keep rule, `compose` or the box. Not checked: which of
 flatten and threshold alone would keep the text, and whether the rectangle's coordinates map exactly onto the issue's range.
-The `BITONAL_WHITENED` list proves `keep_box` only, not the whole pipeline. The dump code was temporary and is not in the tree.
+The `PDFABLE_WHITENED` list proves `keep_box` only, not the whole pipeline. The dump code was temporary and is not in the tree.
 
 ### Covers: flatten, not the threshold, whitens the circles (#71)
 
@@ -1326,7 +1326,7 @@ the tree), f5 p1, all four flags:
 | D1 after `load` (before flatten) | 114.0 | 64 / 109 / 240 | 86.3 % | 92.5 % | 327 239 (93.6 %), `hyst` on it through the same crop + rotate |
 | D2 after `flatten` (page) | 232.2 | 194 / 238 / 255 | 0.56 % | 1.17 % | – |
 | D3 before `hyst` (slot) | 232.2 | 196 / 238 / 255 | 0.55 % | 1.16 % | 4193 (1.20 %) |
-| `BITONAL_SLOTFLAT=1`: D1 / D3 | 115.7 / 230.1 | – | 85.4 / 1.1 % | – | 324 322 / 7046 |
+| `PDFABLE_SLOTFLAT=1`: D1 / D3 | 115.7 / 230.1 | – | 85.4 / 1.1 % | – | 324 322 / 7046 |
 
 So the fill is not light: its luma is ≈ 0.43 (78 % of the rectangle in the 102–127 bin), the text is ≈ 1.0 (5 % in 230–255).
 `flatten` divides by a σ = 30 px blur; the circles are far wider, so the fill becomes ≈ 1.0 and the white text (> 1.0) is
@@ -1370,7 +1370,7 @@ changed (f5 p1 has no page number).
 - The cover rule is tuned on one page (26 big pieces against at most 12 elsewhere). A cover below the count keeps the old
   rendering, and there is no hold-out (#47).
 - Readability is `checker`'s judgement at 100 dpi, not a number.
-- `BITONAL_WHITENED=1` lists both `keep_box` passes for a cover slot.
+- `PDFABLE_WHITENED=1` lists both `keep_box` passes for a cover slot.
 - The text/fill colours in the source were not measured (luma only).
 
 ### Survey: the cover rule on 201 real scans (#96)
@@ -1552,7 +1552,7 @@ grey source page stays 1-bit (the list fixes it). Unverifiable here: seven scans
 **Decision: a listed slot is the whole slot** (turned, split at the gutter, deskewed; no text box, no keep rule), shown at the
 text canvas' page size with its 150-dpi pixels intact. Unlisted slots are untouched. [measured, labels?, scans]
 
-Reproduce: a temporary `BITONAL_PLANDUMP` print of the plan box, own trim box, page size and canvas per page (removed again),
+Reproduce: a temporary `PDFABLE_PLANDUMP` print of the plan box, own trim box, page size and canvas per page (removed again),
 `--rotate --crop --split auto --deskew` on f1–f7, region fractions from `work/labels.tsv`; lists from the labels (a slot is
 listed when a region reaches it, f7 p7 whole: 42 slots, as §9.1's label list). Distances in mm at 300 dpi.
 - **What the text-mode plan box cuts** (the box `finish` crops, not §5.1's own trim box): **12 of 46** regions are not fully

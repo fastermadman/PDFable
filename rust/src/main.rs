@@ -1,23 +1,23 @@
-// bitonalPDF Rust spike (#28 PDF I/O, #29 image ops): PDF in (embedded page image or render) -> rotate/crop/split/
-// deskew -> 1-bit -> CCITT G4 PDF out. Same CLI as bitonalpdf.sh (text mode):
-//   bitonalpdf [--rotate] [--crop] [--split auto|off|N%] [--deskew] [--colour-pages LIST|all|none] input.pdf [output.pdf] [threshold%=60] [dpi=300]
-// MODE=images (as bitonalpdf.sh) = --colour-pages all: every page colour JPEG, default output <input>.shrunk.pdf.
+// PDFable Rust spike (#28 PDF I/O, #29 image ops): PDF in (embedded page image or render) -> rotate/crop/split/
+// deskew -> 1-bit -> CCITT G4 PDF out. Same CLI as pdfable.sh (text mode):
+//   pdfable [--rotate] [--crop] [--split auto|off|N%] [--deskew] [--colour-pages LIST|all|none] input.pdf [output.pdf] [threshold%=60] [dpi=300]
+// MODE=images (as pdfable.sh) = --colour-pages all: every page colour JPEG, default output <input>.shrunk.pdf.
 // PROGRESS_FILE=<path>: one line per finished page is appended (droplet). --page-count input.pdf prints the page count.
-// BITONAL_TIMING=1 prints per-page geometry and stage times (ms) to stderr; BITONAL_RENDER=1 always renders.
+// PDFABLE_TIMING=1 prints per-page geometry and stage times (ms) to stderr; PDFABLE_RENDER=1 always renders.
 // A/B knobs for the pipeline-order questions of #29 (docs/rust-port.md section 2):
-//   BITONAL_ADPI=<dpi>      analysis (crop/gutter) resolution, default = dpi (150 flips crop decisions, section 2)
-//   BITONAL_SLOTFLAT=1      flatten each slot after crop/deskew like bash, instead of once on the full page
-//   BITONAL_DESKEW_FIRST=1  estimate the skew on the whole page and straighten it before measuring crop/gutter
-//   BITONAL_INKGUTTER=1     gutter profile from the 60 % ink map instead of the lenient grey level (threshold once)
-//   BITONAL_KEEP_D=<n>      (#55, #60) with --crop, each slot keeps the text block and the components near it (keep_box:
+//   PDFABLE_ADPI=<dpi>      analysis (crop/gutter) resolution, default = dpi (150 flips crop decisions, section 2)
+//   PDFABLE_SLOTFLAT=1      flatten each slot after crop/deskew like bash, instead of once on the full page
+//   PDFABLE_DESKEW_FIRST=1  estimate the skew on the whole page and straighten it before measuring crop/gutter
+//   PDFABLE_INKGUTTER=1     gutter profile from the 60 % ink map instead of the lenient grey level (threshold once)
+//   PDFABLE_KEEP_D=<n>      (#55, #60) with --crop, each slot keeps the text block and the components near it (keep_box:
 //                           "near" = n letter heights, default 4), is cropped to them and centred / top-aligned with
 //                           the others on one canvas (compose; docs/rust-port.md section 8)
-//   BITONAL_WHITENED=1      (#63) with --crop, keep_box prints one TSV row per whitened component to stderr ("whitened" page slot
+//   PDFABLE_WHITENED=1      (#63) with --crop, keep_box prints one TSV row per whitened component to stderr ("whitened" page slot
 //                           x0 y0 x1 y1 pixels letters outside reason slot_h); tests/whitened.py filters it. Off: no change.
 //                           (#84) plus one "reached" row per page number added from beyond the slot (page slot x0 y0 x1 y1
 //                           pieces height_in_letters); (#87) one "line" row per clipped text line restored (page slot x0 y0 x1 y1
 //                           class white_rows_in_letters cut), class = body | heading | headfoot.
-//   BITONAL_OSD=tesseract   orientation by Tesseract OSD (as bash) instead of the own detector (#30); --osd-eval prints its accuracy
+//   PDFABLE_OSD=tesseract   orientation by Tesseract OSD (as bash) instead of the own detector (#30); --osd-eval prints its accuracy
 //                           (EVAL_UPRIGHT=1: the input pages are upright, no Tesseract truth; #45)
 // --detect-eval a.pdf [b.pdf ...] prints candidate picture/colour signals per page and tile as TSV (#43, docs/rust-port.md section 4).
 use hayro::hayro_interpret::font::Glyph;
@@ -35,7 +35,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-// Tunables, same names and values as bitonalpdf.sh (see there and docs/lessons.md for why).
+// Tunables, same names and values as pdfable.sh (see there and docs/lessons.md for why).
 const OSD_MIN_CONFIDENCE: f32 = 1.0;
 // Own orientation detector (#30): downsample factors for the axis and direction stages, tile size at the axis
 // stage's resolution, minimum confidence (below it the page is left as it is).
@@ -128,10 +128,10 @@ struct Cfg {
     slot_flat: bool,
     deskew_first: bool,
     ink_gutter: bool,
-    keep_d: f64, // BITONAL_KEEP_D: keep_box's distance in median letter heights
-    whitened: bool, // BITONAL_WHITENED=1 (#63): keep_box lists what it whitens on stderr
+    keep_d: f64, // PDFABLE_KEEP_D: keep_box's distance in median letter heights
+    whitened: bool, // PDFABLE_WHITENED=1 (#63): keep_box lists what it whitens on stderr
     timing: bool,
-    tess: bool, // BITONAL_OSD=tesseract: the old detector
+    tess: bool, // PDFABLE_OSD=tesseract: the old detector
     colour: Vec<(usize, Option<usize>)>, // #76 --colour-pages: input page (0-based), slot (None = all slots)
     colour_all: bool, // --colour-pages all / MODE=images: every slot a JPEG page, and the "not smaller" gate applies
 }
@@ -176,14 +176,14 @@ fn main() {
         split: Split::Off,
         thresh: 60.0,
         dpi: 300.0,
-        adpi: std::env::var("BITONAL_ADPI").ok().and_then(|s| s.parse().ok()).unwrap_or(f32::MAX),
-        slot_flat: env("BITONAL_SLOTFLAT"),
-        deskew_first: env("BITONAL_DESKEW_FIRST"),
-        ink_gutter: env("BITONAL_INKGUTTER"),
-        whitened: std::env::var("BITONAL_WHITENED").is_ok_and(|v| v == "1"),
-        keep_d: std::env::var("BITONAL_KEEP_D").ok().and_then(|s| s.parse().ok()).unwrap_or(4.0),
-        timing: env("BITONAL_TIMING"),
-        tess: std::env::var("BITONAL_OSD").as_deref() == Ok("tesseract"),
+        adpi: std::env::var("PDFABLE_ADPI").ok().and_then(|s| s.parse().ok()).unwrap_or(f32::MAX),
+        slot_flat: env("PDFABLE_SLOTFLAT"),
+        deskew_first: env("PDFABLE_DESKEW_FIRST"),
+        ink_gutter: env("PDFABLE_INKGUTTER"),
+        whitened: std::env::var("PDFABLE_WHITENED").is_ok_and(|v| v == "1"),
+        keep_d: std::env::var("PDFABLE_KEEP_D").ok().and_then(|s| s.parse().ok()).unwrap_or(4.0),
+        timing: env("PDFABLE_TIMING"),
+        tess: std::env::var("PDFABLE_OSD").as_deref() == Ok("tesseract"),
         colour: vec![],
         colour_all: false,
     };
@@ -227,7 +227,7 @@ fn main() {
     if detect {
         return detect_eval(&pos);
     }
-    let input = pos.first().unwrap_or_else(|| die("usage: bitonalpdf [--rotate] [--crop] [--split auto|off|N%] [--deskew] [--colour-pages LIST|all|none] input.pdf [output.pdf] [threshold%] [dpi]"));
+    let input = pos.first().unwrap_or_else(|| die("usage: pdfable [--rotate] [--crop] [--split auto|off|N%] [--deskew] [--colour-pages LIST|all|none] input.pdf [output.pdf] [threshold%] [dpi]"));
     let suffix = if cfg.colour_all { "shrunk" } else { "1bit" };
     let output = pos.get(1).cloned().unwrap_or_else(|| format!("{}.{suffix}.pdf", input.trim_end_matches(".pdf")));
     cfg.thresh = pos.get(2).map_or(60.0, |s| s.parse().unwrap_or_else(|_| die("bad threshold")));
@@ -237,7 +237,7 @@ fn main() {
         die("output must differ from input");
     }
     if cfg.rotate && cfg.tess && std::process::Command::new("tesseract").arg("--version").output().is_err() {
-        eprintln!("BITONAL_OSD=tesseract needs tesseract — proceeding without rotation");
+        eprintln!("PDFABLE_OSD=tesseract needs tesseract — proceeding without rotation");
         cfg.rotate = false;
     }
 
@@ -274,7 +274,7 @@ fn main() {
     }
     let t1 = Instant::now();
 
-    // Between passes: document medians, per-page plan, one canvas size (same rules as bitonalpdf.sh).
+    // Between passes: document medians, per-page plan, one canvas size (same rules as pdfable.sh).
     let (plans, review) = plan(&metas, &cfg);
     let (mut tw, mut th) = (0, 0);
     for p in &plans {
@@ -299,7 +299,7 @@ fn main() {
         }
     }
     eprintln!("colour pages: {}", colour_list(&col, &plans));
-    // PROGRESS_FILE (droplet): one line per finished page, as bitonalpdf.sh writes it
+    // PROGRESS_FILE (droplet): one line per finished page, as pdfable.sh writes it
     let progress = std::env::var_os("PROGRESS_FILE").map(|f| {
         std::sync::Mutex::new(std::fs::OpenOptions::new().append(true).create(true).open(f).unwrap_or_else(|e| die(&format!("PROGRESS_FILE: {e}"))))
     });
@@ -1151,7 +1151,7 @@ fn page_gray(page: &Page, dpi: f32, smooth: bool) -> (Gray, &'static str) {
     let ic = InterpreterCache::new();
     let mut ctx = Context::new(init, Rect::new(0.0, 0.0, w as f64, h as f64), &ic, page.xref(), settings.clone());
     interpret_page(page, &mut ctx, &mut probe);
-    if let (false, 1, Some(g), None) = (probe.other, probe.images, probe.got, std::env::var_os("BITONAL_RENDER")) {
+    if let (false, 1, Some(g), None) = (probe.other, probe.images, probe.got, std::env::var_os("PDFABLE_RENDER")) {
         return (g, "image");
     }
 
@@ -1463,7 +1463,7 @@ fn q8(v: f64) -> f64 {
 }
 
 /// Text-block bounds [x0, y0, x1, y1) of an ink map: rows first, then columns inside the row range
-/// (port of bitonalpdf.sh content_box, see docs/lessons.md 1, 4, 6, 6b).
+/// (port of pdfable.sh content_box, see docs/lessons.md 1, 4, 6, 6b).
 fn content_box(ink: &[bool], w: usize, h: usize, band: bool, px_per_mm: f64) -> [usize; 4] {
     let rows: Vec<f64> = (0..h).map(|y| q8(ink[y * w..(y + 1) * w].iter().filter(|&&b| b).count() as f64 / w as f64)).collect();
     let (max_h, seg) = ((BAND_TEXT_MAX_H_MM * px_per_mm).round() as i64, (BAND_TEXT_SEG_MM * px_per_mm).round() as usize);
@@ -1659,9 +1659,9 @@ fn gutter(flat: &Img, (x0, x1): (usize, usize)) -> Option<(usize, usize)> {
     if ok { Some((gx, gw)) } else { valley() }
 }
 
-/// Tesseract OSD quarter turn (0/90/180/270), like bash rotate_page. Only with BITONAL_OSD=tesseract; `osd_own` is the default (#30).
+/// Tesseract OSD quarter turn (0/90/180/270), like bash rotate_page. Only with PDFABLE_OSD=tesseract; `osd_own` is the default (#30).
 fn osd(g: &Img) -> u32 {
-    let path = std::env::temp_dir().join(format!("bitonal-osd-{}-{:p}.pgm", std::process::id(), g));
+    let path = std::env::temp_dir().join(format!("pdfable-osd-{}-{:p}.pgm", std::process::id(), g));
     let mut f = format!("P5 {} {} 255\n", g.w, g.h).into_bytes();
     f.extend(g.px.iter().map(|&v| (v * 255.0).round() as u8));
     if std::fs::write(&path, f).is_err() {
@@ -1761,7 +1761,7 @@ fn direction(ps: &[Vec<f64>]) -> f64 {
 /// #30 measurement: every page, upright (by Tesseract) and turned 0/90/180/270, own detector vs the truth.
 fn osd_eval(data: &Arc<Vec<u8>>, n: usize) {
     let ev = |k: &str, d: usize| std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d);
-    let (ka, kd, tile) = (ev("BITONAL_OSDKA", OSD_KA), ev("BITONAL_OSDKD", OSD_KD), ev("BITONAL_OSDTILE", OSD_TILE));
+    let (ka, kd, tile) = (ev("PDFABLE_OSDKA", OSD_KA), ev("PDFABLE_OSDKD", OSD_KD), ev("PDFABLE_OSDTILE", OSD_TILE));
     let tess = std::env::var_os("EVAL_TESS").is_some();
     let upright = std::env::var_os("EVAL_UPRIGHT").is_some(); // pages known to be upright (#45): no Tesseract truth
     let rows = par_pages(data, n, |p, i| {

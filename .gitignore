@@ -1,4 +1,4 @@
-bitonalPDF.app
+*.app
 .DS_Store
 tests/real/*
 !tests/real/.gitkeep

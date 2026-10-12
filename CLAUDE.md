@@ -1,4 +1,4 @@
-# bitonalPDF: working agreements
+# PDFable: working agreements
 
 ## Plain-language summary (owner is not a specialist in this code)
 

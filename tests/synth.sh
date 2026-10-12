@@ -1,13 +1,13 @@
 #!/bin/bash
 # Synthetic regression suite: generated fixtures (rectangles and speckle only, CI has no fonts), the
 # pipeline run on each, the result *measured* (tests/measure.sh), one pass/fail row per case.
-# Usage: [BIN=path/to/implementation] tests/synth.sh     (default BIN: bitonalpdf.sh in the repo root)
-# BIN must accept the bitonalpdf.sh CLI (flags, input, output), so a Rust binary plugs in unchanged.
+# Usage: [BIN=path/to/implementation] tests/synth.sh     (default BIN: pdfable.sh in the repo root)
+# BIN must accept the pdfable.sh CLI (flags, input, output), so a Rust binary plugs in unchanged.
 # Rows: PASS / FAIL / KNOWN-FAIL (an open defect that still fails: reported, exit 0) / XPASS (a known
 # defect that now passes: exit 1, move it out of the KNOWN list). Exit 1 on any FAIL or XPASS.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
-BIN=${BIN:-./bitonalpdf.sh}
+BIN=${BIN:-./pdfable.sh}
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 MEASURE=tests/measure.sh
 bad=0
