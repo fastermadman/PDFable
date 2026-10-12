@@ -1,8 +1,8 @@
 #!/bin/bash
-# bitonalPDF — shrink scanned PDFs. Needs: brew install poppler imagemagick
+# PDFable — shrink scanned PDFs. Needs: brew install poppler imagemagick
 # Optional (only for --rotate): brew install tesseract
 #
-# Usage: [MODE=text|images] bitonalpdf.sh [options] input.pdf [output.pdf] [threshold%=60] [dpi]
+# Usage: [MODE=text|images] pdfable.sh [options] input.pdf [output.pdf] [threshold%=60] [dpi]
 #   MODE=text    (default) 1-bit Group4 at 300 dpi. For pure text scans (typewriter/print):
 #                colour and greytones are dropped on purpose. Higher threshold = bolder text
 #                (try 55-70). The background is flattened first, so shadows from microfilm or

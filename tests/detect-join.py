@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Join `bitonalpdf --detect-eval` output with hand labels and score every signal (#43, docs/rust-port.md section 4).
+"""Join `pdfable --detect-eval` output with hand labels and score every signal (#43, docs/rust-port.md section 4).
 
 Usage: tests/detect-join.py det.tsv <folder with X.pdf and X.labels> [--tsv joined.tsv]
 Labels (`X.labels`, tab-separated, git-ignored with the PDFs): page, classes, certain, regions, note. A region is

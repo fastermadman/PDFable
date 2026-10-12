@@ -1,8 +1,8 @@
 on open theFiles
-	set script_path to (POSIX path of (path to me)) & "Contents/Resources/bitonalpdf"
+	set script_path to (POSIX path of (path to me)) & "Contents/Resources/pdfable"
 	set env to "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin; "
 	set textChoice to "Pure text (1-bit, smallest)"
-	set valg to choose from list {textChoice, "With pictures/diagrams (colour)"} with title "bitonalPDF" with prompt "What kind of PDF?" default items {textChoice}
+	set valg to choose from list {textChoice, "With pictures/diagrams (colour)"} with title "PDFable" with prompt "What kind of PDF?" default items {textChoice}
 	if valg is false then return
 	set m to "text"
 	if (item 1 of valg) starts with "With" then set m to "images"
@@ -11,7 +11,7 @@ on open theFiles
 	set cropChoice to "Crop scanner/microfilm borders"
 	set splitChoice to "Split double (two-page) spreads"
 	set deskewChoice to "Deskew (straighten crooked scans)"
-	set prep to choose from list {rotateChoice, cropChoice, splitChoice, deskewChoice} with title "bitonalPDF" with prompt "Preprocessing (optional):" with multiple selections allowed
+	set prep to choose from list {rotateChoice, cropChoice, splitChoice, deskewChoice} with title "PDFable" with prompt "Preprocessing (optional):" with multiple selections allowed
 	set extraArgs to ""
 	if prep is not false then
 		if prep contains rotateChoice then set extraArgs to extraArgs & "--rotate "
@@ -43,12 +43,12 @@ on open theFiles
 				set exitCode to do shell script "cat " & quoted form of codef
 				do shell script "rm -f " & quoted form of pf & " " & quoted form of resf & " " & quoted form of codef
 				if exitCode is "2" then
-					display notification r & " — some pages need a manual check" with title "bitonalPDF (check pages)"
+					display notification r & " — some pages need a manual check" with title "PDFable (check pages)"
 				else
-					display notification r with title "bitonalPDF"
+					display notification r with title "PDFable"
 				end if
 			on error e
-				display notification e with title "bitonalPDF failed"
+				display notification e with title "PDFable failed"
 			end try
 		end if
 	end repeat

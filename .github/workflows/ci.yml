@@ -25,13 +25,13 @@ jobs:
         env:
           HOMEBREW_NO_AUTO_UPDATE: 1
           HOMEBREW_NO_INSTALL_CLEANUP: 1
-      - run: shellcheck -e SC1090,SC2153 bitonalpdf.sh build.sh tests/smoke.sh tests/real.sh tests/synth.sh tests/measure.sh
+      - run: shellcheck -e SC1090,SC2153 pdfable.sh build.sh tests/smoke.sh tests/real.sh tests/synth.sh tests/measure.sh
       - run: tests/smoke.sh
       - run: tests/synth.sh
       # the Rust binary is what the app ships; same CLI, so the same tests run against it
       - run: cargo build --release --manifest-path rust/Cargo.toml
-      - run: BIN=rust/target/release/bitonalpdf tests/smoke.sh
-      - run: BIN=rust/target/release/bitonalpdf tests/synth.sh
+      - run: BIN=rust/target/release/pdfable tests/smoke.sh
+      - run: BIN=rust/target/release/pdfable tests/synth.sh
 
   build:
     runs-on: macos-latest
@@ -63,5 +63,5 @@ jobs:
           pages = [Image.effect_noise((1240, 1754), 60).point(lambda v: 30 if v < 90 else 230) for _ in range(2)]
           pages[0].save("in.pdf", save_all=True, append_images=pages[1:], resolution=150)
           PY
-          rust/target/release/bitonalpdf --crop --deskew in.pdf out.pdf
+          rust/target/release/pdfable --crop --deskew in.pdf out.pdf
           python -c "import os, pypdf; n = len(pypdf.PdfReader('out.pdf').pages); a, b = os.path.getsize('in.pdf'), os.path.getsize('out.pdf'); print(n, a, '->', b); assert n == 2 and b < a"

@@ -7,7 +7,7 @@
 # crop/split fails even though the file "looks fine". Create/refresh them, after LOOKING at out/, with --record.
 # Usage: tests/real.sh [--record] [--rotate --crop --split auto --deskew]   (default flags: all four)
 # ONLY=<name> runs just that scan. SIZE_TOL=<pt> allows that much page-size difference (default 0: exact; for another implementation).
-# BIN=<script> runs another implementation (default: bitonalpdf.sh in the repo root).
+# BIN=<script> runs another implementation (default: pdfable.sh in the repo root).
 set -uo pipefail
 cd "$(dirname "$0")/real" || exit 1
 RECORD=0; [ "${1:-}" = --record ] && { RECORD=1; shift; }
@@ -17,7 +17,7 @@ for f in *.pdf; do
   [ -f "$f" ] || { echo "no PDFs in tests/real/ — put your scans there" >&2; exit 1; }
   found=1; name=${f%.pdf}; [ -z "${ONLY:-}" ] || [ "$name" = "$ONLY" ] || continue; o="out/$name.pdf"; rm -f "$o"
   start=$(date +%s)
-  "${BIN:-../../bitonalpdf.sh}" "${FLAGS[@]}" "$f" "$o" >"out/$name.log" 2>&1; rc=$?
+  "${BIN:-../../pdfable.sh}" "${FLAGS[@]}" "$f" "$o" >"out/$name.log" 2>&1; rc=$?
   secs=$(( $(date +%s) - start ))
   # rc 2 = pages flagged for manual check; anything else non-zero is a failure
   # "Not smaller" = the input was already small; correct for a clean PDF, so it counts as a pass

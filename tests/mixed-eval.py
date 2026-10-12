@@ -2,8 +2,8 @@
 """Detection at a safe operating point, error cost and size of a mixed output (#38, docs/rust-port.md section 5).
 
 Usage: tests/mixed-eval.py det.tsv <folder with X.pdf, X.labels> geom.txt slots.txt <text dir> <images dir> [--sizes]
-  det.tsv    `bitonalpdf --detect-eval` output (section 4.5)
-  geom.txt   pass-A lines of `BITONAL_TIMING=1 bitonalpdf --crop --split auto fN.pdf` ("fN P: ... box Some([..]) ... gutter ..")
+  det.tsv    `pdfable --detect-eval` output (section 4.5)
+  geom.txt   pass-A lines of `PDFABLE_TIMING=1 pdfable --crop --split auto fN.pdf` ("fN P: ... box Some([..]) ... gutter ..")
   slots.txt  pass-B lines of the same run ("fN P: ... deskew [a, b]": one angle per output slot)
   text dir / images dir: fN.texttess.pdf / fN.images.pdf (same output page count as the run above)
   --sizes    also render every page at 150 dpi and JPEG (q65 4:2:0, MODE=images' setting) the labelled and the detected

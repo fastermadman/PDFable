@@ -3,7 +3,7 @@
 # BASE_BIN (e.g. a build of main) adds "identical / differs" per file for f1..f7 and tests/real/*.pdf; differs is not a
 # failure. Exit 1 if cargo test, synth.sh or real.sh fail. The visual check (checker on the pages) is not part of this.
 set -uo pipefail
-R=$(cd "$(dirname "$0")/.." && pwd); BIN=$R/rust/target/release/bitonalpdf; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; rc=0
+R=$(cd "$(dirname "$0")/.." && pwd); BIN=$R/rust/target/release/pdfable; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; rc=0
 FLAGS=(--rotate --crop --split auto --deskew)
 step() { echo; echo "== $1"; }
 step "cargo test --release"; (cd "$R/rust" && cargo build --release -q && cargo test --release 2>&1 | grep -E "^test |test result") || rc=1
