@@ -22,5 +22,5 @@ at the right edge on p. 7 (outside the boxes, as in the 1-bit page). Examples: `
 ## Decision
 
 `--mineru` stays opt-in (a layout.json is needed anyway): when a layout.json is given the figures are drawn, with no extra
-flag. Cost is +98 % over 1-bit on a picture-rich book (split Allan Poulsen) and +57 % on Materialitet, but 36-48 % below all
+flag. Cost is +98 % over 1-bit on a picture-rich book (split Allan Poulsen) and +57 % on Materialitet, but 39-65 % below all
 colour. Whether this should be the default for every run is the owner's decision; it cannot be without a MinerU result.
