@@ -137,6 +137,7 @@ struct Cfg {
     colour_all: bool, // --colour-pages all / MODE=images: every slot a JPEG page, and the "not smaller" gate applies
     copy: Option<String>, // #82 --colour-copy FILE: a second, colour PDF with exactly the 1-bit pages' geometry
     mineru: Vec<String>, // #113 --mineru layout.json (repeatable, in page order): MinerU's text as an invisible layer
+    mineru_figs: bool, // #114 --mineru-figures auto|off: auto (default) also draws MinerU's figures in colour from the input
 }
 
 /// Pass A result for one page, in output-dpi pixels (after the quarter-turn `rot`, and after straightening by
@@ -191,6 +192,7 @@ fn main() {
         colour_all: false,
         copy: None,
         mineru: vec![],
+        mineru_figs: true,
     };
     match std::env::var("MODE").as_deref() {
         Ok("images") => cfg.colour_all = true,
@@ -226,6 +228,11 @@ fn main() {
             },
             "--colour-copy" => cfg.copy = Some(it.next().cloned().unwrap_or_else(|| die("--colour-copy FILE"))),
             "--mineru" => cfg.mineru.push(it.next().cloned().unwrap_or_else(|| die("--mineru layout.json"))),
+            "--mineru-figures" => cfg.mineru_figs = match it.next().map(String::as_str) {
+                Some("auto") => true,
+                Some("off") => false,
+                _ => die("--mineru-figures auto|off"),
+            },
             "--page-count" => count = true,
             s if s.starts_with("--") => die(&format!("{s}: unknown option")),
             _ => pos.push(a.clone()),
@@ -363,7 +370,10 @@ fn main() {
     let texts = if cfg.mineru.is_empty() { vec![] } else { mineru_text(&cfg.mineru, &slots, cfg.dpi) };
     // #114: MinerU's figures cut from the input in colour, over the 1-bit page. Input = the #82 colour copy without
     // geometry flags, so input page i is output page i; a split run has more slots than pages and gets no figures.
-    let figs = if cfg.mineru.is_empty() || slots.len() != n { vec![] } else { mineru_figs(&cfg.mineru, &slots, cfg.dpi) };
+    if !cfg.mineru.is_empty() && cfg.mineru_figs && slots.len() != n {
+        eprintln!("--mineru: {} output pages from {n} input pages (split): no figures in colour", slots.len());
+    }
+    let figs = if cfg.mineru.is_empty() || !cfg.mineru_figs || slots.len() != n { vec![] } else { mineru_figs(&cfg.mineru, &slots, cfg.dpi) };
     let figs: Vec<Vec<Fig>> = if figs.iter().all(Vec::is_empty) { vec![] } else { par_pages(&data, n, |p, i| fig_jpegs(p, &figs[i])) };
     if !figs.is_empty() {
         let (k, b) = figs.iter().flatten().fold((0, 0), |(k, b), f| (k + 1, b + f.data.len()));
@@ -2489,7 +2499,7 @@ mod tests {
     fn test_cfg(rotate: bool, split: Split, dpi: f32) -> Cfg {
         Cfg {
             rotate, crop: true, deskew: false, split, thresh: 60.0, dpi, adpi: f32::MAX, slot_flat: false, deskew_first: false,
-            ink_gutter: false, keep_d: 4.0, whitened: false, timing: false, tess: false, colour: vec![], colour_all: false, copy: None, mineru: vec![],
+            ink_gutter: false, keep_d: 4.0, whitened: false, timing: false, tess: false, colour: vec![], colour_all: false, copy: None, mineru: vec![], mineru_figs: true,
         }
     }
 
