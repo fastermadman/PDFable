@@ -21,6 +21,11 @@ at the right edge on p. 7 (outside the boxes, as in the 1-bit page). Examples: `
 
 ## Decision
 
-`--mineru` stays opt-in (a layout.json is needed anyway): when a layout.json is given the figures are drawn, with no extra
-flag. Cost is +98 % over 1-bit on a picture-rich book (split Allan Poulsen) and +57 % on Materialitet, but 39-65 % below all
-colour. Whether this should be the default for every run is the owner's decision; it cannot be without a MinerU result.
+`--mineru-figures auto|off`, default **auto**: with `--mineru layout.json` the figures are drawn in colour from the input (the
+colour copy, or a colour scan with the 1-bit pages' geometry); `off` gives only the invisible text layer. Without `--mineru`
+nothing changes (byte-identical to main). A split run (more output pages than input pages) gets no figures and says so on
+stderr. Cost of auto: +98 % over 1-bit on the split Allan Poulsen (2 602 344 -> 5 144 199 B), +57 % on Materialitet, but
+16-38 % of the scanned original and 39-65 % below all colour. `off` on the split copy: 3 015 449 B (1-bit + text layer).
+
+Figures are 150 dpi against sources of 300 dpi (Allan Poulsen) and 200 dpi (Materialitet): never upscaled. MinerU's own
+returned PDF (`*_origin.pdf`) is a copy of the upload, so it is no size reference.
