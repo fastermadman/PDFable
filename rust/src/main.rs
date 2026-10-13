@@ -356,12 +356,20 @@ fn main() {
             .iter()
             .map(|g| Slot::Jpeg { w: g.w, h: g.h, data: encode_jpeg_with(g, COPY_QUALITY, jpeg_encoder::SamplingFactor::F_1_1), pt: (g.w as f32 * 72.0 / cfg.dpi, g.h as f32 * 72.0 / cfg.dpi) })
             .collect();
-        let bytes = write_slots(&jp, cfg.dpi, &[]);
+        let bytes = write_slots(&jp, cfg.dpi, &[], &[]);
         std::fs::write(path, &bytes).unwrap_or_else(|e| die(&format!("{path}: {e}")));
         println!("colour copy: {} B: {path}", bytes.len());
     }
     let texts = if cfg.mineru.is_empty() { vec![] } else { mineru_text(&cfg.mineru, &slots, cfg.dpi) };
-    let pdf = write_slots(&slots, cfg.dpi, &texts);
+    // #114: MinerU's figures cut from the input in colour, over the 1-bit page. Input = the #82 colour copy without
+    // geometry flags, so input page i is output page i; a split run has more slots than pages and gets no figures.
+    let figs = if cfg.mineru.is_empty() || slots.len() != n { vec![] } else { mineru_figs(&cfg.mineru, &slots, cfg.dpi) };
+    let figs: Vec<Vec<Fig>> = if figs.iter().all(Vec::is_empty) { vec![] } else { par_pages(&data, n, |p, i| fig_jpegs(p, &figs[i])) };
+    if !figs.is_empty() {
+        let (k, b) = figs.iter().flatten().fold((0, 0), |(k, b), f| (k + 1, b + f.data.len()));
+        println!("--mineru: {k} figures in colour, {b} B");
+    }
+    let pdf = write_slots(&slots, cfg.dpi, &texts, &figs);
     let (in_len, out_len) = (data.len(), pdf.len());
     if out_len >= in_len && cfg.colour.is_empty() && cfg.mineru.is_empty() {  // #76: colour pages were asked for, so a bigger file is expected
         println!("Not smaller ({in_len} B is already small) — no file written");
@@ -2100,7 +2108,7 @@ fn jpeg_slot(g: &Rgb, pt: (f32, f32)) -> Slot {
 #[cfg(test)]
 fn write_pdf(pages: &[(u32, u32, Vec<u8>)], dpi: f32) -> Vec<u8> {
     let slots: Vec<Slot> = pages.iter().map(|(w, h, g4)| Slot::G4(*w, *h, g4.clone())).collect();
-    write_slots(&slots, dpi, &[])
+    write_slots(&slots, dpi, &[], &[])
 }
 
 /// #113: one line of MinerU text and its box in the page's own points (origin top-left).
@@ -2295,6 +2303,66 @@ fn mineru_text(files: &[String], slots: &[Slot], dpi: f32) -> Vec<Vec<TextLine>>
         .collect()
 }
 
+const FIG_PAD_PT: f32 = 3.0; // #114: around MinerU's figure box, whose edge can sit on the photo and leave a 1-bit rim
+
+/// #114: one figure cut from the input page: its box in pt (top-left origin, on whole pixels of the cut) and the JPEG.
+struct Fig {
+    b: [f32; 4],
+    w: u32,
+    h: u32,
+    data: Vec<u8>,
+}
+
+/// #114: MinerU's figure boxes per output page, in output pt (top-left origin), padded by FIG_PAD_PT and kept on the page.
+/// Only `image`/`chart` bodies: captions and footnotes are text, tables read better in 1-bit. Page count or size mismatch:
+/// no figures (mineru_text has already warned about the same files).
+fn mineru_figs(files: &[String], slots: &[Slot], dpi: f32) -> Vec<Vec<[f32; 4]>> {
+    let mut pages = vec![];
+    for f in files {
+        let j = json(&std::fs::read(f).unwrap_or_else(|e| die(&format!("{f}: {e}")))).unwrap_or_else(|| die(&format!("{f}: not valid JSON")));
+        pages.extend(j.arr("pdf_info").iter().map(fig_boxes));
+    }
+    if pages.len() != slots.len() {
+        return vec![];
+    }
+    pages.into_iter().zip(slots).map(|((sz, b), s)| fit_boxes(&sz, b, slot_pt(s, dpi))).collect()
+}
+
+/// One `pdf_info` page: (page_size, figure body boxes in MinerU's pt).
+fn fig_boxes(p: &J) -> (Vec<f32>, Vec<[f32; 4]>) {
+    let bodies = p.arr("para_blocks").iter().filter(|b| matches!(b.str("type"), "image" | "chart")).flat_map(|b| b.arr("blocks"));
+    let boxes = bodies.filter(|b| b.str("type").ends_with("_body")).filter_map(|b| b.nums("bbox")).filter(|v| v.len() == 4).map(|v| [v[0], v[1], v[2], v[3]]);
+    (p.nums("page_size").unwrap_or_default(), boxes.collect())
+}
+
+/// MinerU pt -> output pt, padded and clamped to the page; none when the page sizes differ by more than 2 pt (like mineru_text).
+fn fit_boxes(sz: &[f32], b: Vec<[f32; 4]>, (pw, ph): (f32, f32)) -> Vec<[f32; 4]> {
+    if sz.len() != 2 || (sz[0] - pw).abs() > 2.0 || (sz[1] - ph).abs() > 2.0 {
+        return vec![];
+    }
+    let (sx, sy, p) = (pw / sz[0], ph / sz[1], FIG_PAD_PT);
+    b.iter().map(|b| [(b[0] * sx - p).max(0.0), (b[1] * sy - p).max(0.0), (b[2] * sx + p).min(pw), (b[3] * sy + p).min(ph)]).filter(|b| b[2] > b[0] && b[3] > b[1]).collect()
+}
+
+/// #114: the boxes cut from the page rendered in colour at JPEG_DPI, as q65 4:2:0 JPEGs like #76's colour pages.
+fn fig_jpegs(page: &Page, boxes: &[[f32; 4]]) -> Vec<Fig> {
+    if boxes.is_empty() {
+        return vec![];
+    }
+    let g = page_rgb(page, JPEG_DPI);
+    let s = JPEG_DPI / 72.0;
+    boxes
+        .iter()
+        .filter_map(|b| {
+            let px = |v: f32, max: u32, f: fn(f32) -> f32| (f(v * s) as u32).min(max);
+            let (x0, y0, x1, y1) = (px(b[0], g.w, f32::floor), px(b[1], g.h, f32::floor), px(b[2], g.w, f32::ceil), px(b[3], g.h, f32::ceil));
+            let (w, h) = (x1.checked_sub(x0).filter(|&w| w > 0)?, y1.checked_sub(y0).filter(|&h| h > 0)?);
+            let cut: Vec<u8> = (y0..y1).flat_map(|y| g.px[((y * g.w + x0) * 3) as usize..((y * g.w + x1) * 3) as usize].iter().copied()).collect();
+            Some(Fig { b: [x0 as f32 / s, y0 as f32 / s, x1 as f32 / s, y1 as f32 / s], w, h, data: encode_jpeg(&Rgb { w, h, px: cut }, 65) })
+        })
+        .collect()
+}
+
 fn slot_pt(slot: &Slot, dpi: f32) -> (f32, f32) {
     match slot {
         Slot::G4(w, h, _) => (*w as f32 * 72.0 / dpi, *h as f32 * 72.0 / dpi),
@@ -2302,7 +2370,8 @@ fn slot_pt(slot: &Slot, dpi: f32) -> (f32, f32) {
     }
 }
 
-fn write_slots(pages: &[Slot], dpi: f32, texts: &[Vec<TextLine>]) -> Vec<u8> {
+/// `figs[k]`: #114 colour figures drawn over page k's image, each its own JPEG XObject (Im1, Im2, ...).
+fn write_slots(pages: &[Slot], dpi: f32, texts: &[Vec<TextLine>], figs: &[Vec<Fig>]) -> Vec<u8> {
     use pdf_writer::{Content, Filter, Name, Pdf, Rect, Ref, Str};
     let mut pdf = Pdf::new();
     let font = Ref::new(3 + 3 * pages.len() as i32);
@@ -2310,14 +2379,22 @@ fn write_slots(pages: &[Slot], dpi: f32, texts: &[Vec<TextLine>]) -> Vec<u8> {
     let ids = |k: usize| (Ref::new(3 + 3 * k as i32), Ref::new(4 + 3 * k as i32), Ref::new(5 + 3 * k as i32));
     pdf.catalog(catalog).pages(tree);
     pdf.pages(tree).kids((0..pages.len()).map(|k| ids(k).0)).count(pages.len() as i32);
+    let mut next = font.get() + 1; // #114: figure XObjects after the font
     for (k, slot) in pages.iter().enumerate() {
         let (page_id, img_id, content_id) = ids(k);
         let (pw, ph) = slot_pt(slot, dpi);
         let lines = texts.get(k).map_or(&[][..], |t| t.as_slice());
+        let fs = figs.get(k).map_or(&[][..], |f| f.as_slice());
+        let fig_ids: Vec<Ref> = fs.iter().map(|_| (Ref::new(next), next += 1).0).collect();
         let mut page = pdf.page(page_id);
         page.parent(tree).media_box(Rect::new(0.0, 0.0, pw, ph)).contents(content_id);
         let mut res = page.resources();
-        res.x_objects().pair(Name(b"Im0"), img_id);
+        let mut xo = res.x_objects();
+        xo.pair(Name(b"Im0"), img_id);
+        for (j, id) in fig_ids.iter().enumerate() {
+            xo.pair(Name(format!("Im{}", j + 1).as_bytes()), *id);
+        }
+        drop(xo);
         if !lines.is_empty() {
             res.fonts().pair(Name(b"F0"), font);
         }
@@ -2340,6 +2417,15 @@ fn write_slots(pages: &[Slot], dpi: f32, texts: &[Vec<TextLine>]) -> Vec<u8> {
         }
         let mut c = Content::new();
         c.save_state().transform([pw, 0.0, 0.0, ph, 0.0, 0.0]).x_object(Name(b"Im0")).restore_state();
+        for (j, (f, id)) in fs.iter().zip(&fig_ids).enumerate() {
+            let mut img = pdf.image_xobject(*id, &f.data);
+            img.filter(Filter::DctDecode);
+            img.width(f.w as i32).height(f.h as i32).bits_per_component(8);
+            img.color_space().device_rgb();
+            drop(img);
+            let [x0, y0, x1, y1] = f.b;
+            c.save_state().transform([x1 - x0, 0.0, 0.0, y1 - y0, x0, ph - y1]).x_object(Name(format!("Im{}", j + 1).as_bytes())).restore_state();
+        }
         // #113: Courier (all glyphs 0.6 em) so Tz makes the string span the box exactly; ascent .629 / descent .157 so the
         // selection highlight is the box. Tr 3 = invisible.
         for l in lines {
@@ -2373,6 +2459,17 @@ mod tests {
         assert_eq!((v[0].s.as_slice(), v[1].s.as_slice()), (&b"p\xe5 \"1\""[..], &b"\x92x"[..]));
         let r = rows(b"aaaa bbbb cccc dddd eeee ffff gggg hhhh".to_vec(), [0.0, 0.0, 30.0, 40.0]);
         assert!(r.len() > 1 && r.iter().all(|l| l.b[3] <= 40.01 && !l.s.is_empty()));
+    }
+
+    // #114: only image/chart bodies (not captions, not tables); padded, clamped to the page; a size mismatch gives none.
+    #[test]
+    fn mineru_fig_boxes() {
+        let j = json(br#"{"page_size":[100,200],"para_blocks":[{"type":"image","blocks":[{"type":"image_body","bbox":[1,10,50,60]},{"type":"image_caption","bbox":[1,62,50,70]}]},{"type":"table","blocks":[{"type":"table_body","bbox":[0,100,90,150]}]},{"type":"text","bbox":[0,0,9,9]}]}"#).unwrap();
+        let (sz, b) = fig_boxes(&j);
+        assert_eq!(b, vec![[1.0, 10.0, 50.0, 60.0]]);
+        let p = FIG_PAD_PT;
+        assert_eq!(fit_boxes(&sz, b.clone(), (100.0, 200.0)), vec![[0.0, 10.0 - p, 50.0 + p, 60.0 + p]]);
+        assert!(fit_boxes(&sz, b, (200.0, 100.0)).is_empty());
     }
 
     #[test]
@@ -2519,7 +2616,7 @@ mod tests {
         let rgb = Rgb { w: jw, h: jh, px };
         let pt = (w as f32 * 72.0 / dpi, h as f32 * 72.0 / dpi);
         let g4 = || Slot::G4(w, h, encode_g4(&bits, w));
-        let pdf = write_slots(&[g4(), jpeg_slot(&rgb, pt), g4()], dpi, &[]);
+        let pdf = write_slots(&[g4(), jpeg_slot(&rgb, pt), g4()], dpi, &[], &[]);
         if let Some(f) = std::env::var_os("MIXED_OUT") {
             std::fs::write(f, &pdf).unwrap(); // for pdfimages -list / a visual check
         }
