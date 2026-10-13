@@ -136,6 +136,7 @@ struct Cfg {
     colour: Vec<(usize, Option<usize>)>, // #76 --colour-pages: input page (0-based), slot (None = all slots)
     colour_all: bool, // --colour-pages all / MODE=images: every slot a JPEG page, and the "not smaller" gate applies
     copy: Option<String>, // #82 --colour-copy FILE: a second, colour PDF with exactly the 1-bit pages' geometry
+    mineru: Vec<String>, // #113 --mineru layout.json (repeatable, in page order): MinerU's text as an invisible layer
 }
 
 /// Pass A result for one page, in output-dpi pixels (after the quarter-turn `rot`, and after straightening by
@@ -189,6 +190,7 @@ fn main() {
         colour: vec![],
         colour_all: false,
         copy: None,
+        mineru: vec![],
     };
     match std::env::var("MODE").as_deref() {
         Ok("images") => cfg.colour_all = true,
@@ -223,6 +225,7 @@ fn main() {
                 None => die("--colour-pages LIST|all|none"),
             },
             "--colour-copy" => cfg.copy = Some(it.next().cloned().unwrap_or_else(|| die("--colour-copy FILE"))),
+            "--mineru" => cfg.mineru.push(it.next().cloned().unwrap_or_else(|| die("--mineru layout.json"))),
             "--page-count" => count = true,
             s if s.starts_with("--") => die(&format!("{s}: unknown option")),
             _ => pos.push(a.clone()),
@@ -353,13 +356,14 @@ fn main() {
             .iter()
             .map(|g| Slot::Jpeg { w: g.w, h: g.h, data: encode_jpeg_with(g, COPY_QUALITY, jpeg_encoder::SamplingFactor::F_1_1), pt: (g.w as f32 * 72.0 / cfg.dpi, g.h as f32 * 72.0 / cfg.dpi) })
             .collect();
-        let bytes = write_slots(&jp, cfg.dpi);
+        let bytes = write_slots(&jp, cfg.dpi, &[]);
         std::fs::write(path, &bytes).unwrap_or_else(|e| die(&format!("{path}: {e}")));
         println!("colour copy: {} B: {path}", bytes.len());
     }
-    let pdf = write_slots(&slots, cfg.dpi);
+    let texts = if cfg.mineru.is_empty() { vec![] } else { mineru_text(&cfg.mineru, &slots, cfg.dpi) };
+    let pdf = write_slots(&slots, cfg.dpi, &texts);
     let (in_len, out_len) = (data.len(), pdf.len());
-    if out_len >= in_len && cfg.colour.is_empty() {  // #76: colour pages were asked for, so a bigger file is expected
+    if out_len >= in_len && cfg.colour.is_empty() && cfg.mineru.is_empty() {  // #76: colour pages were asked for, so a bigger file is expected
         println!("Not smaller ({in_len} B is already small) — no file written");
         return;
     }
@@ -2096,25 +2100,228 @@ fn jpeg_slot(g: &Rgb, pt: (f32, f32)) -> Slot {
 #[cfg(test)]
 fn write_pdf(pages: &[(u32, u32, Vec<u8>)], dpi: f32) -> Vec<u8> {
     let slots: Vec<Slot> = pages.iter().map(|(w, h, g4)| Slot::G4(*w, *h, g4.clone())).collect();
-    write_slots(&slots, dpi)
+    write_slots(&slots, dpi, &[])
 }
 
-fn write_slots(pages: &[Slot], dpi: f32) -> Vec<u8> {
-    use pdf_writer::{Content, Filter, Name, Pdf, Rect, Ref};
+/// #113: one line of MinerU text and its box in the page's own points (origin top-left).
+struct TextLine {
+    s: Vec<u8>, // WinAnsi bytes
+    b: [f32; 4], // x0 y0 x1 y1
+}
+
+/// WinAnsi byte of a char, None when the font has none (ponytail: no embedded font + ToUnicode for the rest).
+fn winansi(c: char) -> Option<u8> {
+    Some(match c {
+        ' '..='~' | '\u{a0}'..='\u{ff}' => c as u8,
+        '\u{2018}' => 0x91, '\u{2019}' => 0x92, '\u{201c}' => 0x93, '\u{201d}' => 0x94,
+        '\u{2022}' => 0x95, '\u{2013}' => 0x96, '\u{2014}' => 0x97, '\u{2026}' => 0x85, '\u{20ac}' => 0x80,
+        _ => return None,
+    })
+}
+
+enum J {
+    Num(f64),
+    Str(String),
+    Arr(Vec<J>),
+    Obj(Vec<(String, J)>),
+    Other,
+}
+
+impl J {
+    fn get(&self, k: &str) -> Option<&J> {
+        if let J::Obj(o) = self { o.iter().find(|(n, _)| n == k).map(|(_, v)| v) } else { None }
+    }
+    fn arr(&self, k: &str) -> &[J] {
+        if let Some(J::Arr(a)) = self.get(k) { a } else { &[] }
+    }
+    fn str(&self, k: &str) -> &str {
+        if let Some(J::Str(s)) = self.get(k) { s } else { "" }
+    }
+    fn nums(&self, k: &str) -> Option<Vec<f32>> {
+        let a: Vec<f32> = self.arr(k).iter().filter_map(|v| if let J::Num(n) = v { Some(*n as f32) } else { None }).collect();
+        (a.len() == 2 || a.len() == 4).then_some(a)
+    }
+}
+
+/// Minimal JSON reader for layout.json (no serde in the tree); None on malformed input.
+fn json(s: &[u8]) -> Option<J> {
+    fn ws(s: &[u8], i: &mut usize) {
+        while s.get(*i).is_some_and(|c| c.is_ascii_whitespace()) {
+            *i += 1;
+        }
+    }
+    fn hex4(s: &[u8], i: &mut usize) -> Option<u32> {
+        let v = u32::from_str_radix(std::str::from_utf8(s.get(*i..*i + 4)?).ok()?, 16).ok()?;
+        *i += 4;
+        Some(v)
+    }
+    fn string(s: &[u8], i: &mut usize) -> Option<String> {
+        *i += 1;
+        let mut out = vec![];
+        loop {
+            let c = *s.get(*i)?;
+            *i += 1;
+            match c {
+                b'"' => return String::from_utf8(out).ok(),
+                b'\\' => {
+                    let e = *s.get(*i)?;
+                    *i += 1;
+                    let ch = match e {
+                        b'n' => '\n', b't' => '\t', b'r' => '\r', b'b' => '\u{8}', b'f' => '\u{c}',
+                        b'u' => {
+                            let mut u = hex4(s, i)?;
+                            if (0xd800..0xdc00).contains(&u) && s.get(*i..*i + 2) == Some(b"\\u") {
+                                *i += 2;
+                                u = 0x10000 + ((u - 0xd800) << 10) + (hex4(s, i)?.wrapping_sub(0xdc00) & 0x3ff);
+                            }
+                            char::from_u32(u).unwrap_or('\u{fffd}')
+                        }
+                        c => c as char,
+                    };
+                    out.extend(ch.to_string().as_bytes());
+                }
+                c => out.push(c),
+            }
+        }
+    }
+    fn val(s: &[u8], i: &mut usize) -> Option<J> {
+        ws(s, i);
+        match *s.get(*i)? {
+            b'"' => string(s, i).map(J::Str),
+            b'[' | b'{' => {
+                let obj = s[*i] == b'{';
+                *i += 1;
+                let (mut a, mut o) = (vec![], vec![]);
+                loop {
+                    ws(s, i);
+                    match *s.get(*i)? {
+                        b']' | b'}' => break *i += 1,
+                        b',' => *i += 1,
+                        _ if obj => {
+                            let k = string(s, i)?;
+                            ws(s, i);
+                            (*s.get(*i)? == b':').then_some(())?;
+                            *i += 1;
+                            o.push((k, val(s, i)?));
+                        }
+                        _ => a.push(val(s, i)?),
+                    }
+                }
+                Some(if obj { J::Obj(o) } else { J::Arr(a) })
+            }
+            _ => {
+                let j = *i;
+                while s.get(*i).is_some_and(|c| !b",]} \n\r\t".contains(c)) {
+                    *i += 1;
+                }
+                Some(std::str::from_utf8(&s[j..*i]).ok()?.parse().map_or(J::Other, J::Num))
+            }
+        }
+    }
+    let mut i = 0;
+    val(s, &mut i)
+}
+
+/// MinerU's "line" is a whole paragraph in some backends (hybrid on a scan). Cut a box that is too tall for one line into rows
+/// at spaces: k rows where k rows of n/k chars at 0.5 em fit the box, ie k = sqrt(0.5 n h / w). A true single line gives 1.
+fn rows(s: Vec<u8>, b: [f32; 4]) -> Vec<TextLine> {
+    let (n, w, h) = (s.len() as f32, (b[2] - b[0]).max(1.0), (b[3] - b[1]).max(1.0));
+    let k = ((0.5 * n * h / w).sqrt().round() as usize).clamp(1, s.len().max(1));
+    let (per, rh) = (n / k as f32, h / k as f32);
+    let (mut out, mut i) = (vec![], 0);
+    for r in 0..k {
+        let end = if r + 1 == k { s.len() } else { // break at the space nearest the even split
+            let t = ((r + 1) as f32 * per) as usize;
+            (1..s.len()).filter(|&j| s[j] == b' ').min_by_key(|&j| j.abs_diff(t)).filter(|&j| j > i).unwrap_or(t.max(i + 1).min(s.len()))
+        };
+        let row: Vec<u8> = s[i..end].iter().copied().collect::<Vec<_>>();
+        let row = row.trim_ascii().to_vec();
+        if !row.is_empty() {
+            let x1 = if r + 1 == k { b[0] + w * (row.len() as f32 / per).min(1.0) } else { b[2] };
+            out.push(TextLine { s: row, b: [b[0], b[1] + r as f32 * rh, x1, b[1] + (r + 1) as f32 * rh] });
+        }
+        i = end;
+    }
+    out
+}
+
+/// Every line under a block (nested `blocks` occur in image and table blocks); text spans only, so table HTML and equations are skipped.
+fn block_lines(b: &J, out: &mut Vec<TextLine>, skipped: &mut usize) {
+    for l in b.arr("lines") {
+        let txt: String = l.arr("spans").iter().filter(|s| s.str("type") == "text").map(|s| s.str("content")).collect();
+        let Some(bb) = l.nums("bbox").filter(|b| b.len() == 4) else { continue };
+        let s: Vec<u8> = txt.trim().chars().filter_map(|c| winansi(c).or_else(|| { *skipped += 1; None })).collect();
+        out.extend(rows(s, [bb[0], bb[1], bb[2], bb[3]]));
+    }
+    b.arr("blocks").iter().for_each(|c| block_lines(c, out, skipped));
+}
+
+/// The invisible text per output page, from layout.json files given in page order. Page count mismatch: no layer at all;
+/// page size mismatch (> 2 pt): no layer on that page. Both warn on stderr.
+fn mineru_text(files: &[String], slots: &[Slot], dpi: f32) -> Vec<Vec<TextLine>> {
+    let (mut pages, mut skipped) = (vec![], 0);
+    for f in files {
+        let d = std::fs::read(f).unwrap_or_else(|e| die(&format!("{f}: {e}")));
+        let j = json(&d).unwrap_or_else(|| die(&format!("{f}: not valid JSON")));
+        for p in j.arr("pdf_info") {
+            let mut v = vec![];
+            for k in ["para_blocks", "discarded_blocks"] {
+                p.arr(k).iter().for_each(|b| block_lines(b, &mut v, &mut skipped));
+            }
+            pages.push((p.nums("page_size").unwrap_or_default(), v));
+        }
+    }
+    if skipped > 0 {
+        eprintln!("--mineru: {skipped} characters outside WinAnsi skipped");
+    }
+    if pages.len() != slots.len() {
+        eprintln!("Warning: --mineru: layout.json has {} pages but the output has {}: no text layer", pages.len(), slots.len());
+        return vec![];
+    }
+    pages
+        .into_iter()
+        .zip(slots)
+        .enumerate()
+        .map(|(i, ((sz, mut lines), slot))| {
+            let (pw, ph) = slot_pt(slot, dpi);
+            if sz.len() != 2 || (sz[0] - pw).abs() > 2.0 || (sz[1] - ph).abs() > 2.0 {
+                eprintln!("Warning: --mineru: page {} is {:?} pt in layout.json but {:.0}x{:.0} in the output: no text on it", i + 1, sz, pw, ph);
+                return vec![];
+            }
+            let (sx, sy) = (pw / sz[0], ph / sz[1]);
+            lines.iter_mut().for_each(|l| l.b = [l.b[0] * sx, l.b[1] * sy, l.b[2] * sx, l.b[3] * sy]);
+            lines
+        })
+        .collect()
+}
+
+fn slot_pt(slot: &Slot, dpi: f32) -> (f32, f32) {
+    match slot {
+        Slot::G4(w, h, _) => (*w as f32 * 72.0 / dpi, *h as f32 * 72.0 / dpi),
+        Slot::Jpeg { pt, .. } => *pt,
+    }
+}
+
+fn write_slots(pages: &[Slot], dpi: f32, texts: &[Vec<TextLine>]) -> Vec<u8> {
+    use pdf_writer::{Content, Filter, Name, Pdf, Rect, Ref, Str};
     let mut pdf = Pdf::new();
+    let font = Ref::new(3 + 3 * pages.len() as i32);
     let (catalog, tree) = (Ref::new(1), Ref::new(2));
     let ids = |k: usize| (Ref::new(3 + 3 * k as i32), Ref::new(4 + 3 * k as i32), Ref::new(5 + 3 * k as i32));
     pdf.catalog(catalog).pages(tree);
     pdf.pages(tree).kids((0..pages.len()).map(|k| ids(k).0)).count(pages.len() as i32);
     for (k, slot) in pages.iter().enumerate() {
         let (page_id, img_id, content_id) = ids(k);
-        let (pw, ph) = match slot {
-            Slot::G4(w, h, _) => (*w as f32 * 72.0 / dpi, *h as f32 * 72.0 / dpi),
-            Slot::Jpeg { pt, .. } => *pt,
-        };
+        let (pw, ph) = slot_pt(slot, dpi);
+        let lines = texts.get(k).map_or(&[][..], |t| t.as_slice());
         let mut page = pdf.page(page_id);
         page.parent(tree).media_box(Rect::new(0.0, 0.0, pw, ph)).contents(content_id);
-        page.resources().x_objects().pair(Name(b"Im0"), img_id);
+        let mut res = page.resources();
+        res.x_objects().pair(Name(b"Im0"), img_id);
+        if !lines.is_empty() {
+            res.fonts().pair(Name(b"F0"), font);
+        }
+        drop(res);
         drop(page);
         match slot {
             Slot::G4(w, h, g4) => {
@@ -2133,7 +2340,19 @@ fn write_slots(pages: &[Slot], dpi: f32) -> Vec<u8> {
         }
         let mut c = Content::new();
         c.save_state().transform([pw, 0.0, 0.0, ph, 0.0, 0.0]).x_object(Name(b"Im0")).restore_state();
+        // #113: Courier (all glyphs 0.6 em) so Tz makes the string span the box exactly; ascent .629 / descent .157 so the
+        // selection highlight is the box. Tr 3 = invisible.
+        for l in lines {
+            let (w, h) = (l.b[2] - l.b[0], l.b[3] - l.b[1]);
+            let fs = h / 0.786;
+            c.begin_text().set_font(Name(b"F0"), fs).set_text_rendering_mode(pdf_writer::types::TextRenderingMode::Invisible);
+            c.set_horizontal_scaling(w / (0.6 * fs * l.s.len() as f32) * 100.0);
+            c.set_text_matrix([1.0, 0.0, 0.0, 1.0, l.b[0], ph - l.b[3] + 0.157 * fs]).show(Str(&l.s)).end_text();
+        }
         pdf.stream(content_id, &c.finish());
+    }
+    if texts.iter().any(|t| !t.is_empty()) {
+        pdf.type1_font(font).base_font(Name(b"Courier")).encoding_predefined(Name(b"WinAnsiEncoding"));
     }
     pdf.finish()
 }
@@ -2144,6 +2363,18 @@ mod tests {
 
     // Round trip through the whole I/O layer: bitmap -> G4 -> PDF -> hayro -> extraction path -> same bitmap,
     // at the right page size. Covers encoder polarity, DecodeParms, MediaBox/dpi and the Probe fit check.
+    // #113: layout.json shape (nested blocks, equations skipped, escapes) and a paragraph-sized box cut into rows.
+    #[test]
+    fn mineru_lines() {
+        let j = json(br#"{"a":[{"lines":[{"bbox":[0,0,100,10],"spans":[{"type":"text","content":"p\u00e5 \"1\""},{"type":"inline_equation","content":"x^2"}]}],"blocks":[{"lines":[{"bbox":[0,20,50,30],"spans":[{"type":"text","content":"\u2019x"}]}]}]}]}"#).unwrap();
+        let (mut v, mut sk) = (vec![], 0);
+        block_lines(&j.arr("a")[0], &mut v, &mut sk);
+        assert_eq!((v.len(), sk), (2, 0));
+        assert_eq!((v[0].s.as_slice(), v[1].s.as_slice()), (&b"p\xe5 \"1\""[..], &b"\x92x"[..]));
+        let r = rows(b"aaaa bbbb cccc dddd eeee ffff gggg hhhh".to_vec(), [0.0, 0.0, 30.0, 40.0]);
+        assert!(r.len() > 1 && r.iter().all(|l| l.b[3] <= 40.01 && !l.s.is_empty()));
+    }
+
     #[test]
     fn g4_pdf_roundtrip() {
         let (w, h, dpi) = (301u32, 207u32, 150.0);
@@ -2161,7 +2392,7 @@ mod tests {
     fn test_cfg(rotate: bool, split: Split, dpi: f32) -> Cfg {
         Cfg {
             rotate, crop: true, deskew: false, split, thresh: 60.0, dpi, adpi: f32::MAX, slot_flat: false, deskew_first: false,
-            ink_gutter: false, keep_d: 4.0, whitened: false, timing: false, tess: false, colour: vec![], colour_all: false, copy: None,
+            ink_gutter: false, keep_d: 4.0, whitened: false, timing: false, tess: false, colour: vec![], colour_all: false, copy: None, mineru: vec![],
         }
     }
 
@@ -2288,7 +2519,7 @@ mod tests {
         let rgb = Rgb { w: jw, h: jh, px };
         let pt = (w as f32 * 72.0 / dpi, h as f32 * 72.0 / dpi);
         let g4 = || Slot::G4(w, h, encode_g4(&bits, w));
-        let pdf = write_slots(&[g4(), jpeg_slot(&rgb, pt), g4()], dpi);
+        let pdf = write_slots(&[g4(), jpeg_slot(&rgb, pt), g4()], dpi, &[]);
         if let Some(f) = std::env::var_os("MIXED_OUT") {
             std::fs::write(f, &pdf).unwrap(); // for pdfimages -list / a visual check
         }
