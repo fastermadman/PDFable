@@ -94,6 +94,7 @@ const TIGHT_RIM: f32 = 0.03; // --crop: white rim around a slot before its box i
 const BLUR_SIGMA: f32 = 30.0; // px at the output dpi, like bash's -blur 0x30
 const COVER_BLUR_SIGMA: f32 = 1000.0; // px, a cover slot's flatten (#71): wider than f5 p1's circles, so fills stay grey
 const SKEW_MAX_DEG: f32 = 10.0;
+const COPY_QUALITY: u8 = 90; // #82: the colour copy (temporary, for MinerU): output dpi, q90, no chroma subsampling
 const JPEG_DPI: f32 = 150.0; // #76: colour pages are rendered at this dpi (q65, 4:2:0)
 
 struct Gray {
@@ -134,6 +135,7 @@ struct Cfg {
     tess: bool, // PDFABLE_OSD=tesseract: the old detector
     colour: Vec<(usize, Option<usize>)>, // #76 --colour-pages: input page (0-based), slot (None = all slots)
     colour_all: bool, // --colour-pages all / MODE=images: every slot a JPEG page, and the "not smaller" gate applies
+    copy: Option<String>, // #82 --colour-copy FILE: a second, colour PDF with exactly the 1-bit pages' geometry
 }
 
 /// Pass A result for one page, in output-dpi pixels (after the quarter-turn `rot`, and after straightening by
@@ -186,6 +188,7 @@ fn main() {
         tess: std::env::var("PDFABLE_OSD").as_deref() == Ok("tesseract"),
         colour: vec![],
         colour_all: false,
+        copy: None,
     };
     match std::env::var("MODE").as_deref() {
         Ok("images") => cfg.colour_all = true,
@@ -219,6 +222,7 @@ fn main() {
                 Some(l) => (cfg.colour, cfg.colour_all) = (parse_colour_pages(l), false),
                 None => die("--colour-pages LIST|all|none"),
             },
+            "--colour-copy" => cfg.copy = Some(it.next().cloned().unwrap_or_else(|| die("--colour-copy FILE"))),
             "--page-count" => count = true,
             s if s.starts_with("--") => die(&format!("{s}: unknown option")),
             _ => pos.push(a.clone()),
@@ -226,6 +230,9 @@ fn main() {
     }
     if detect {
         return detect_eval(&pos);
+    }
+    if cfg.copy.is_some() && (cfg.colour_all || !cfg.colour.is_empty()) {
+        die("--colour-copy cannot be combined with --colour-pages or MODE=images");
     }
     let input = pos.first().unwrap_or_else(|| die("usage: pdfable [--rotate] [--crop] [--split auto|off|N%] [--deskew] [--colour-pages LIST|all|none] input.pdf [output.pdf] [threshold%] [dpi]"));
     let suffix = if cfg.colour_all { "shrunk" } else { "1bit" };
@@ -303,7 +310,7 @@ fn main() {
     let progress = std::env::var_os("PROGRESS_FILE").map(|f| {
         std::sync::Mutex::new(std::fs::OpenOptions::new().append(true).create(true).open(f).unwrap_or_else(|e| die(&format!("PROGRESS_FILE: {e}"))))
     });
-    let (slots, colour): (Vec<(u32, u32, Vec<u8>, [usize; 2])>, Vec<Option<Rgb>>) = par_pages(&data, n, |p, i| {
+    let done = par_pages(&data, n, |p, i| {
         let r = finish(p, i, &metas[i], plans[i], (tw, th), col[i], &cfg);
         if let Some(f) = &progress {
             let _ = writeln!(f.lock().unwrap(), "{}", i + 1);
@@ -311,8 +318,19 @@ fn main() {
         r
     })
     .into_iter()
-    .flatten()
-    .unzip();
+    .flatten();
+    let (mut slots, mut colour, mut copies) = (vec![], vec![], vec![]);
+    for (s, c, k) in done {
+        slots.push(s);
+        colour.push(c);
+        copies.push(k);
+    }
+    // #82: the colour copy is placed like compose places the 1-bit slots, so work out the canvas before compose consumes them
+    let copy_pages = cfg.copy.as_ref().map(|_| {
+        let lay = cfg.crop.then(|| canvas(&slots));
+        let anchors: Vec<[usize; 2]> = slots.iter().map(|s| s.3).collect();
+        copies.into_iter().zip(anchors).map(|(k, a)| place_rgb(&k.unwrap(), a, lay)).collect::<Vec<Rgb>>()
+    });
     let pages: Vec<(u32, u32, Vec<u8>)> =
         if cfg.crop { compose(slots, &colour.iter().map(Option::is_some).collect::<Vec<_>>()) } else { slots.into_iter().map(|(w, h, g, _)| (w, h, g)).collect() };
     let t2 = Instant::now();
@@ -328,6 +346,17 @@ fn main() {
             None => Slot::G4(w, h, g4),
         })
         .collect();
+    if let (Some(path), Some(pages)) = (&cfg.copy, copy_pages) {
+        // no "not smaller" gate: the copy is temporary input for MinerU. Same page size in pt as the 1-bit pages.
+        // ponytail: pages are encoded one after the other; per-page threads if a book takes too long
+        let jp: Vec<Slot> = pages
+            .iter()
+            .map(|g| Slot::Jpeg { w: g.w, h: g.h, data: encode_jpeg_with(g, COPY_QUALITY, jpeg_encoder::SamplingFactor::F_1_1), pt: (g.w as f32 * 72.0 / cfg.dpi, g.h as f32 * 72.0 / cfg.dpi) })
+            .collect();
+        let bytes = write_slots(&jp, cfg.dpi);
+        std::fs::write(path, &bytes).unwrap_or_else(|e| die(&format!("{path}: {e}")));
+        println!("colour copy: {} B: {path}", bytes.len());
+    }
     let pdf = write_slots(&slots, cfg.dpi);
     let (in_len, out_len) = (data.len(), pdf.len());
     if out_len >= in_len && cfg.colour.is_empty() {  // #76: colour pages were asked for, so a bigger file is expected
@@ -520,7 +549,7 @@ fn plan(metas: &[Meta], cfg: &Cfg) -> (Vec<Plan>, Vec<usize>) {
 
 /// Pass B: one or two finished slots (w, h, G4) for a page.
 /// With --crop: instead of G4, the slot's ink box packed 1 bit/px plus the text block's anchor in it (centre x, top y).
-fn finish(page: &Page, i: usize, m: &Meta, plan: Plan, (tw, th): (i64, i64), col: [bool; 2], cfg: &Cfg) -> Vec<((u32, u32, Vec<u8>, [usize; 2]), Option<Rgb>)> {
+fn finish(page: &Page, i: usize, m: &Meta, plan: Plan, (tw, th): (i64, i64), col: [bool; 2], cfg: &Cfg) -> Vec<((u32, u32, Vec<u8>, [usize; 2]), Option<Rgb>, Option<Rgb>)> {
     let t0 = Instant::now();
     let mut src = load(page, cfg, m.rot);
     let t1 = Instant::now();
@@ -545,7 +574,9 @@ fn finish(page: &Page, i: usize, m: &Meta, plan: Plan, (tw, th): (i64, i64), col
         Plan::Split(_, gx) => vec![[0, 0, gx, h], [gx, 0, w, h]],
         _ => vec![[0, 0, w, h]],
     };
-    let planes = col.iter().any(|&c| c).then(|| colour_planes(page, m));
+    let planes = col.iter().any(|&c| c).then(|| colour_planes(page, m, JPEG_DPI));
+    // #82: the colour copy: the same page at the output dpi, cut, straightened and cropped exactly like the grey slot
+    let cplanes = cfg.copy.is_some().then(|| colour_planes(page, m, cfg.dpi));
     let tight = cfg.crop;
     let extent = tw > 0 && !matches!(plan, Plan::Whole);
     let mut angles = vec![];
@@ -574,8 +605,16 @@ fn finish(page: &Page, i: usize, m: &Meta, plan: Plan, (tw, th): (i64, i64), col
             } else {
                 (s.w, s.h)
             };
+            let copy = |bx: [usize; 4]| {
+                cplanes.as_ref().map(|p| {
+                    let r = p.each_ref().map(|p| rotate(&crop(p, b), angle, cw, ch, 1.0));
+                    let (w, h) = (bx[2] - bx[0], bx[3] - bx[1]);
+                    let px = (0..w * h).map(|j| (bx[1] + j / w) * cw + bx[0] + j % w).flat_map(|i| [0, 1, 2].map(|c| (r[c].px[i] * 255.0).round().clamp(0.0, 255.0) as u8)).collect();
+                    Rgb { w: w as u32, h: h as u32, px }
+                })
+            };
             if grey_only_size && col[slot] {
-                return ((cw as u32, ch as u32, vec![], [0, 0]), colour);
+                return ((cw as u32, ch as u32, vec![], [0, 0]), colour, None);
             }
             let mut c = rotate(&s, angle, cw, ch, 1.0);
             if cfg.slot_flat {
@@ -665,9 +704,9 @@ fn finish(page: &Page, i: usize, m: &Meta, plan: Plan, (tw, th): (i64, i64), col
                         }
                     }
                 }
-                return ((w as u32, h as u32, packed, [w / 2, 0]), colour);
+                return ((w as u32, h as u32, packed, [w / 2, 0]), colour, copy([x0, y0, x1, y1]));
             }
-            ((c.w as u32, c.h as u32, encode_g4(&bits, c.w as u32), [0, 0]), colour)
+            ((c.w as u32, c.h as u32, encode_g4(&bits, c.w as u32), [0, 0]), colour, copy([0, 0, c.w, c.h]))
         })
         .collect();
     if cfg.timing {
@@ -712,8 +751,8 @@ fn colour_list(col: &[[bool; 2]], plans: &[Plan]) -> String {
 }
 
 /// The page as three colour planes at JPEG_DPI, turned and straightened like `load` plus the pass-A angle in `finish`.
-fn colour_planes(page: &Page, m: &Meta) -> [Img; 3] {
-    let g = page_rgb(page, JPEG_DPI);
+fn colour_planes(page: &Page, m: &Meta, dpi: f32) -> [Img; 3] {
+    let g = page_rgb(page, dpi);
     let (w, h) = (g.w as usize, g.h as usize);
     [0, 1, 2].map(|c| {
         let p = rot90(&Img { w, h, px: g.px.iter().skip(c).step_by(3).map(|&v| v as f32 / 255.0).collect() }, m.rot);
@@ -1099,13 +1138,30 @@ fn reach(rb: &[bool], rw: usize, rh: usize, r: usize, sw: usize, sh: usize, (ccx
 /// --crop (#55): packed 1-bit ink boxes with their text-block anchor -> one canvas; every anchor lands on the
 /// same centre x and top y, the canvas is just big enough for all of them plus a margin, then G4. Pure bit placement.
 // ponytail: one slot with ink far from its text block (an edge band that was not whitened) widens every page
-/// `colour[i]`: slot i becomes a JPEG page, so only its canvas size is needed (no G4).
-fn compose(slots: Vec<(u32, u32, Vec<u8>, [usize; 2])>, colour: &[bool]) -> Vec<(u32, u32, Vec<u8>)> {
+/// The shared canvas of `compose`: (half width, rows above the anchor, side margin, top margin, canvas w, canvas h).
+fn canvas(slots: &[(u32, u32, Vec<u8>, [usize; 2])]) -> (usize, usize, usize, usize, usize, usize) {
     let ext = |f: &dyn Fn(usize, usize, [usize; 2]) -> usize| slots.iter().map(|s| f(s.0 as usize, s.1 as usize, s.3)).max().unwrap_or(0);
     let half = ext(&|w, _, a| a[0].max(w - a[0]));
     let (top, bot) = (ext(&|_, _, a| a[1]), ext(&|_, h, a| h - a[1]));
     let (mx, my) = ((CROP_PAD_FRAC * 2.0 * half as f64) as usize, (CROP_PAD_FRAC * (top + bot) as f64) as usize);
-    let (cw, ch) = (2 * half + 2 * mx, top + bot + 2 * my);
+    (half, top, mx, my, 2 * half + 2 * mx, top + bot + 2 * my)
+}
+
+/// #82: a colour slot on white at the offset `compose` gives the 1-bit slot with anchor `a`; `lay` None = no --crop, the slot is the page.
+fn place_rgb(g: &Rgb, a: [usize; 2], lay: Option<(usize, usize, usize, usize, usize, usize)>) -> Rgb {
+    let Some((half, top, mx, my, cw, ch)) = lay else { return Rgb { w: g.w, h: g.h, px: g.px.clone() } };
+    let (ox, oy) = (mx + half - a[0], my + top - a[1]);
+    let mut px = vec![255u8; cw * ch * 3];
+    for y in 0..g.h as usize {
+        let (s, d) = (y * g.w as usize * 3, ((oy + y) * cw + ox) * 3);
+        px[d..d + g.w as usize * 3].copy_from_slice(&g.px[s..s + g.w as usize * 3]);
+    }
+    Rgb { w: cw as u32, h: ch as u32, px }
+}
+
+/// `colour[i]`: slot i becomes a JPEG page, so only its canvas size is needed (no G4).
+fn compose(slots: Vec<(u32, u32, Vec<u8>, [usize; 2])>, colour: &[bool]) -> Vec<(u32, u32, Vec<u8>)> {
+    let (half, top, mx, my, cw, ch) = canvas(&slots);
     let place = |(i, (w, h, p, a)): (usize, &(u32, u32, Vec<u8>, [usize; 2]))| {
         if colour[i] {
             return (cw as u32, ch as u32, vec![]);
@@ -2020,9 +2076,13 @@ enum Slot {
 
 /// RGB -> baseline JPEG, 4:2:0, quality `q` (the encoder's default tables are the IJG ones).
 fn encode_jpeg(g: &Rgb, q: u8) -> Vec<u8> {
+    encode_jpeg_with(g, q, jpeg_encoder::SamplingFactor::F_2_2)
+}
+
+fn encode_jpeg_with(g: &Rgb, q: u8, sampling: jpeg_encoder::SamplingFactor) -> Vec<u8> {
     let mut out = Vec::new();
     let mut enc = jpeg_encoder::Encoder::new(&mut out, q);
-    enc.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
+    enc.set_sampling_factor(sampling);
     enc.encode(&g.px, g.w as u16, g.h as u16, jpeg_encoder::ColorType::Rgb).unwrap();
     out
 }
@@ -2101,7 +2161,7 @@ mod tests {
     fn test_cfg(rotate: bool, split: Split, dpi: f32) -> Cfg {
         Cfg {
             rotate, crop: true, deskew: false, split, thresh: 60.0, dpi, adpi: f32::MAX, slot_flat: false, deskew_first: false,
-            ink_gutter: false, keep_d: 4.0, whitened: false, timing: false, tess: false, colour: vec![], colour_all: false,
+            ink_gutter: false, keep_d: 4.0, whitened: false, timing: false, tess: false, colour: vec![], colour_all: false, copy: None,
         }
     }
 
@@ -2181,6 +2241,20 @@ mod tests {
         pdf.stream(Ref::new(6), &c.finish());
         let doc = Pdf::new(Arc::new(pdf.finish())).unwrap();
         assert_eq!(page_gray(&doc.pages()[0], 72.0, false).1, "render");
+    }
+
+    // #82: the colour copy lands where compose puts the 1-bit slot: anchor on the same centre x and top y.
+    #[test]
+    fn colour_copy_placement() {
+        let slots = vec![(10u32, 6u32, vec![], [5usize, 2usize]), (20, 8, vec![], [12, 3])];
+        let lay = canvas(&slots);
+        let (half, top, mx, my, cw, ch) = lay;
+        let g = Rgb { w: 10, h: 6, px: vec![0; 10 * 6 * 3] };
+        let p = place_rgb(&g, [5, 2], Some(lay));
+        assert_eq!((p.w as usize, p.h as usize), (cw, ch));
+        let (x, y) = (mx + half - 5, my + top - 2);
+        assert_eq!(p.px[(y * cw + x) * 3], 0);
+        assert_eq!(p.px[(y * cw + x - 1) * 3], 255);
     }
 
     // #76: the list syntax, the list printed back, and a colour page that keeps the text canvas' page size and aspect.
