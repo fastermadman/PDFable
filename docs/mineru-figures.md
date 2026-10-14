@@ -23,8 +23,7 @@ at the right edge on p. 7 (outside the boxes, as in the 1-bit page). Examples: `
 
 `--mineru-figures auto|off`, default **auto**: with `--mineru layout.json` the figures are drawn in colour from the input (the
 colour copy, or a colour scan with the 1-bit pages' geometry); `off` gives only the invisible text layer. Without `--mineru`
-nothing changes (byte-identical to main). A split run (more output pages than input pages) gets no figures and says so on
-stderr. Cost of auto: +98 % over 1-bit on the split Allan Poulsen (2 602 344 -> 5 144 199 B), +57 % on Materialitet, but
+nothing changes (byte-identical to main). Since #126 a split run gets figures too (see below); before, it got none. Cost of auto: +98 % over 1-bit on the split Allan Poulsen (2 602 344 -> 5 144 199 B), +57 % on Materialitet, but
 16-38 % of the scanned original and 39-65 % below all colour. `off` on the split copy: 3 015 449 B (1-bit + text layer).
 
 Figures are 150 dpi against sources of 300 dpi (Allan Poulsen) and 200 dpi (Materialitet): never upscaled. MinerU's own
@@ -49,3 +48,52 @@ pale-blue vacuum cleaner on Uge 38 p19 (2.4 % in pdftoppm); 1 % keeps it and giv
 extra box on Haase p2 (a black-and-white skull drawing with a thin blue line from the box above, 1-2 % in hayro) that becomes a
 JPEG: +6 KB, nothing lost. Both boxes sit in the same 1-2 % band, so no limit in between separates them. Raising the limit
 drops more boxes (3 % also dropped a coffee machine and keys on Uge 38 p19).
+
+## MinerU reads the 1-bit output; PDFable cuts the colour itself (#126)
+
+Two runs with the **same** flags on the original:
+
+```
+pdfable --rotate --crop --split auto --deskew original.pdf out.1bit.pdf                      # 1: upload this to MinerU
+pdfable --rotate --crop --split auto --deskew --mineru layout.json original.pdf out.pdf      # 2: text layer + colour figures
+```
+
+Run 2 makes the same output pages as run 1, so MinerU's boxes (pt, top-left) fit them directly: no mapping (#121). The page
+count and page size checks are against output pages, as for the text layer. A layout from other flags fails those checks
+and gives neither text nor figures. Upload: Allan Poulsen 2 602 344 B instead of 48 860 813 B for the colour copy (#123).
+
+- **Where the colour comes from:** pass B renders the input page in colour (`colour_planes`) and cuts, straightens and crops
+  it exactly like the 1-bit slot, then `place_rgb` puts it where `compose` puts the slot. Same code as the #82 colour copy,
+  scaled to the figure dpi: `JPEG_DPI` for the JPEG and `FIG_TEST_DPI` for the tests. Only slots whose output page has
+  MinerU figures are rendered (the boxes are read before pass B). Rounding: at most one 150 dpi pixel (0.5 pt).
+- **Growing the box:** on the 1-bit page MinerU can return a box smaller than the picture (Allan Poulsen p13 lost its red
+  banner, p10 stopped 28 pt short, #123). Each side moves out by `FIG_GROW_STEP_PT` (2 pt) while more than `FIG_GROW_MIN`
+  (10 %) of the strip just outside is colour or flat mid-tone (the two pixel tests of #124, `fig_counts`), at most
+  `FIG_GROW_MAX` (100 %) of the box's size per side, never past the page. Paper and black-on-white text are neither, so a
+  box beside a text column stays put. A side that reaches the limit with picture still beyond it ran into a
+  coloured panel or page tint, not a picture's edge, and goes back to MinerU's edge (first measurement: Allan p37's orange
+  panel was cut to an L with its text doubled at the JPEG's edge; Læremidler p1's small KLIM logo became a big pale-green
+  field over a text line). The limit was 50 % first; that cut Gyldendal's subject tiles through their label, because
+  MinerU boxes only the illustration and the tile's bottom lies 29-40 pt below a 46-69 pt box. A side that did not move
+  keeps MinerU's padded edge. A side that grew more than 5 strips (10 pt) with a median picture share under 20 % went
+  through haze or a tinted edge and goes back too. Measured on 176 grown sides (Allan with flags; JEPPE, Produktiv læring,
+  Haase, Gyldendal, Kopierne, Fought, copy.pdf, Ingemann without): 124 good, 27 bad, 25 unsure by eye. The median rule
+  stops 5 bad sides (JEPPE p2 left, p3 top, Haase p2's skull right, Ingemann p7 bottom, Kopierne p9 handle right) and no
+  good one; no single share threshold separates the rest (the leading-strip rule at 20 % keeps 91 % of good growth and
+  59 % of bad).
+- **Result on the final rules** (main vs this route, contact sheets by eye): better on Allan p10, p13 (banner), p37 (orange
+  panel whole), Gyldendal's tiles, Kopierne's spreads, Haase p2; worse on JEPPE p2/p3 (colour haze beside the photos),
+  Kopierne p9 (a grey haze square round the door handle), Produktiv læring p2 and Fought's captions. No figure lost; no
+  file grew more than 10 % over main (the largest relative growth is Gyldendal, 526 912 -> 578 559 B, +9.8 %).
+- **Known limits of the growth:** tinted caption panels and pale-blue fields count as picture (shares 0.77-1.00, like real
+  pictures), so Fought's captions (11 bottoms) and Produktiv læring p2's blue field over the caption and gutter are grown
+  into; JEPPE p2 right / p3 left haze (median 0.38-0.41) and the Kopierne p9 handle (0.56/0.57) too. Paper share, edge
+  density and luminance spread in the strip were tried as extra signals; good and bad sides overlap on all three.
+  A grey scan strip that runs to the page edge is grown into
+  (Læremidler p65). Very dark tiles (Gyldendal Historie/Madkundskab: max-min 9-17, luminance 52-74) are neither colour
+  nor flat mid-tone and do not grow.
+- **Line art:** `fig_is_line_art` on the grown box, cut from the `FIG_TEST_DPI` colour page. Without geometry flags that page
+  is the same hayro render #124 measured (a zero-angle straighten is an exact shift); with `--deskew` it is bilinearly
+  straightened, which the 13-file measurement above did not cover.
+- `--colour-copy` is unchanged and still works as input (no flags, page i = page i), but is no longer needed.
+

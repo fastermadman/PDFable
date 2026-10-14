@@ -320,8 +320,15 @@ fn main() {
     let progress = std::env::var_os("PROGRESS_FILE").map(|f| {
         std::sync::Mutex::new(std::fs::OpenOptions::new().append(true).create(true).open(f).unwrap_or_else(|e| die(&format!("PROGRESS_FILE: {e}"))))
     });
+    // #126: MinerU's figure boxes per output page, read before pass B so only the slots that have figures get a colour
+    // rendering. Output page = slot, so a split run works too; the layout must come from a run with the same flags.
+    let fig_raw = if cfg.mineru.is_empty() || !cfg.mineru_figs { vec![] } else { mineru_fig_pages(&cfg.mineru) };
+    let first: Vec<usize> = plans.iter().scan(0, |k, p| Some(std::mem::replace(k, *k + nslots(p)))).collect();
+    let nout = plans.iter().map(nslots).sum::<usize>();
+    let has_figs = |i: usize, slot: usize| fig_raw.len() == nout && slot < nslots(&plans[i]) && !col[i][slot] && !fig_raw[first[i] + slot].1.is_empty();
+    let figc: Vec<[bool; 2]> = (0..n).map(|i| [has_figs(i, 0), has_figs(i, 1)]).collect();
     let done = par_pages(&data, n, |p, i| {
-        let r = finish(p, i, &metas[i], plans[i], (tw, th), col[i], &cfg);
+        let r = finish(p, i, &metas[i], plans[i], (tw, th), col[i], figc[i], &cfg);
         if let Some(f) = &progress {
             let _ = writeln!(f.lock().unwrap(), "{}", i + 1);
         }
@@ -329,18 +336,20 @@ fn main() {
     })
     .into_iter()
     .flatten();
-    let (mut slots, mut colour, mut copies) = (vec![], vec![], vec![]);
-    for (s, c, k) in done {
+    let (mut slots, mut colour, mut copies, mut figcol) = (vec![], vec![], vec![], vec![]);
+    for (s, c, k, f) in done {
         slots.push(s);
         colour.push(c);
         copies.push(k);
+        figcol.push(f);
     }
     // #82: the colour copy is placed like compose places the 1-bit slots, so work out the canvas before compose consumes them
-    let copy_pages = cfg.copy.as_ref().map(|_| {
-        let lay = cfg.crop.then(|| canvas(&slots));
-        let anchors: Vec<[usize; 2]> = slots.iter().map(|s| s.3).collect();
-        copies.into_iter().zip(anchors).map(|(k, a)| place_rgb(&k.unwrap(), a, lay)).collect::<Vec<Rgb>>()
-    });
+    let lay = cfg.crop.then(|| canvas(&slots));
+    let anchors: Vec<[usize; 2]> = slots.iter().map(|s| s.3).collect();
+    let copy_pages = cfg.copy.as_ref().map(|_| copies.into_iter().zip(&anchors).map(|(k, &a)| place_rgb(&k.unwrap(), a, lay, 1.0)).collect::<Vec<Rgb>>());
+    // #126: the figure colour placed the same way, at its own dpi
+    let fig_pages: Vec<Option<[Rgb; 2]>> =
+        figcol.into_iter().zip(&anchors).map(|(f, &a)| f.map(|[hi, lo]| [place_rgb(&hi, a, lay, JPEG_DPI / cfg.dpi), place_rgb(&lo, a, lay, FIG_TEST_DPI / cfg.dpi)])).collect();
     let pages: Vec<(u32, u32, Vec<u8>)> =
         if cfg.crop { compose(slots, &colour.iter().map(Option::is_some).collect::<Vec<_>>()) } else { slots.into_iter().map(|(w, h, g, _)| (w, h, g)).collect() };
     let t2 = Instant::now();
@@ -368,18 +377,19 @@ fn main() {
         println!("colour copy: {} B: {path}", bytes.len());
     }
     let texts = if cfg.mineru.is_empty() { vec![] } else { mineru_text(&cfg.mineru, &slots, cfg.dpi) };
-    // #114: MinerU's figures cut from the input in colour, over the 1-bit page. Input = the #82 colour copy without
-    // geometry flags, so input page i is output page i; a split run has more slots than pages and gets no figures.
-    if !cfg.mineru.is_empty() && cfg.mineru_figs && slots.len() != n {
-        eprintln!("--mineru: {} output pages from {n} input pages (split): no figures in colour", slots.len());
-    }
-    let figs = if cfg.mineru.is_empty() || !cfg.mineru_figs || slots.len() != n { vec![] } else { mineru_figs(&cfg.mineru, &slots, cfg.dpi) };
-    let figs: Vec<(Vec<Fig>, usize)> = if figs.iter().all(Vec::is_empty) { vec![] } else { par_pages(&data, n, |p, i| fig_jpegs(p, &figs[i])) };
-    let flat: usize = figs.iter().map(|f| f.1).sum();
+    // #114/#126: MinerU's figures in colour over the 1-bit page, cut from PDFable's own colour rendering of the input with
+    // the output pages' geometry (fig_pages), each box grown to the picture's edge first.
+    // ponytail: pages one after the other; per-page threads if a book with many figures gets slow
+    let figs: Vec<(Vec<Fig>, usize, usize)> = if fig_pages.iter().all(Option::is_none) {
+        vec![]
+    } else {
+        fig_raw.into_iter().zip(&slots).zip(&fig_pages).map(|(((sz, b), s), g)| g.as_ref().map_or((vec![], 0, 0), |g| fig_jpegs(g, &fit_boxes(&sz, b, slot_pt(s, cfg.dpi))))).collect()
+    };
+    let (flat, grown): (usize, usize) = figs.iter().fold((0, 0), |(a, b), f| (a + f.1, b + f.2));
     let figs: Vec<Vec<Fig>> = figs.into_iter().map(|f| f.0).collect();
     if !figs.is_empty() {
         let (k, b) = figs.iter().flatten().fold((0, 0), |(k, b), f| (k + 1, b + f.data.len()));
-        println!("--mineru: {k} figures in colour, {b} B; {flat} boxes without real colour kept as the page's 1-bit");
+        println!("--mineru: {k} figures in colour, {b} B, {grown} grown to the picture's edge; {flat} boxes without real colour kept as the page's 1-bit");
     }
     let pdf = write_slots(&slots, cfg.dpi, &texts, &figs);
     let (in_len, out_len) = (data.len(), pdf.len());
@@ -571,9 +581,15 @@ fn plan(metas: &[Meta], cfg: &Cfg) -> (Vec<Plan>, Vec<usize>) {
     (plans, review)
 }
 
+/// One slot out of pass B: the 1-bit slot (w, h, packed bits or G4, compose anchor), its #76 colour page, its #82 colour
+/// copy, and its #126 figure colour at [JPEG_DPI, FIG_TEST_DPI].
+type FinishedSlot = ((u32, u32, Vec<u8>, [usize; 2]), Option<Rgb>, Option<Rgb>, Option<[Rgb; 2]>);
+
 /// Pass B: one or two finished slots (w, h, G4) for a page.
 /// With --crop: instead of G4, the slot's ink box packed 1 bit/px plus the text block's anchor in it (centre x, top y).
-fn finish(page: &Page, i: usize, m: &Meta, plan: Plan, (tw, th): (i64, i64), col: [bool; 2], cfg: &Cfg) -> Vec<((u32, u32, Vec<u8>, [usize; 2]), Option<Rgb>, Option<Rgb>)> {
+/// `figc[slot]`: the slot's output page has MinerU figures (#126), so it also returns its colour at JPEG_DPI and
+/// FIG_TEST_DPI, cut, straightened and cropped like the grey slot.
+fn finish(page: &Page, i: usize, m: &Meta, plan: Plan, (tw, th): (i64, i64), col: [bool; 2], figc: [bool; 2], cfg: &Cfg) -> Vec<FinishedSlot> {
     let t0 = Instant::now();
     let mut src = load(page, cfg, m.rot);
     let t1 = Instant::now();
@@ -601,6 +617,8 @@ fn finish(page: &Page, i: usize, m: &Meta, plan: Plan, (tw, th): (i64, i64), col
     let planes = col.iter().any(|&c| c).then(|| colour_planes(page, m, JPEG_DPI));
     // #82: the colour copy: the same page at the output dpi, cut, straightened and cropped exactly like the grey slot
     let cplanes = cfg.copy.is_some().then(|| colour_planes(page, m, cfg.dpi));
+    // #126: the same for MinerU's figures, at the two dpi they are cut and tested at (only pages that have figures)
+    let fplanes = figc.contains(&true).then(|| [JPEG_DPI, FIG_TEST_DPI].map(|d| (d / cfg.dpi, colour_planes(page, m, d))));
     let tight = cfg.crop;
     let extent = tw > 0 && !matches!(plan, Plan::Whole);
     let mut angles = vec![];
@@ -629,16 +647,22 @@ fn finish(page: &Page, i: usize, m: &Meta, plan: Plan, (tw, th): (i64, i64), col
             } else {
                 (s.w, s.h)
             };
-            let copy = |bx: [usize; 4]| {
-                cplanes.as_ref().map(|p| {
-                    let r = p.each_ref().map(|p| rotate(&crop(p, b), angle, cw, ch, 1.0));
-                    let (w, h) = (bx[2] - bx[0], bx[3] - bx[1]);
-                    let px = (0..w * h).map(|j| (bx[1] + j / w) * cw + bx[0] + j % w).flat_map(|i| [0, 1, 2].map(|c| (r[c].px[i] * 255.0).round().clamp(0.0, 255.0) as u8)).collect();
-                    Rgb { w: w as u32, h: h as u32, px }
-                })
+            // planes at `k` x the output dpi: cut by b, straightened onto the cw x ch canvas, kept box bx (all scaled by k)
+            let cut = |p: &[Img; 3], k: f32, bx: [usize; 4]| {
+                let sc = |v: usize| (v as f32 * k).round() as usize;
+                let (rw, rh) = (sc(cw), sc(ch));
+                let r = p.each_ref().map(|p| rotate(&crop(p, b.map(|v| (v as f32 * k).round() as i64)), angle, rw, rh, 1.0));
+                let (x0, y0) = (sc(bx[0]).min(rw), sc(bx[1]).min(rh));
+                let (w, h) = (sc(bx[2]).min(rw) - x0, sc(bx[3]).min(rh) - y0);
+                let px = (0..w * h).map(|j| (y0 + j / w) * rw + x0 + j % w).flat_map(|i| [0, 1, 2].map(|c| (r[c].px[i] * 255.0).round().clamp(0.0, 255.0) as u8)).collect();
+                Rgb { w: w as u32, h: h as u32, px }
+            };
+            let extra = |bx: [usize; 4]| {
+                let fig = fplanes.as_ref().filter(|_| figc[slot]).map(|f| f.each_ref().map(|(k, p)| cut(p, *k, bx)));
+                (cplanes.as_ref().map(|p| cut(p, 1.0, bx)), fig)
             };
             if grey_only_size && col[slot] {
-                return ((cw as u32, ch as u32, vec![], [0, 0]), colour, None);
+                return ((cw as u32, ch as u32, vec![], [0, 0]), colour, None, None);
             }
             let mut c = rotate(&s, angle, cw, ch, 1.0);
             if cfg.slot_flat {
@@ -728,9 +752,11 @@ fn finish(page: &Page, i: usize, m: &Meta, plan: Plan, (tw, th): (i64, i64), col
                         }
                     }
                 }
-                return ((w as u32, h as u32, packed, [w / 2, 0]), colour, copy([x0, y0, x1, y1]));
+                let (copy, fig) = extra([x0, y0, x1, y1]);
+                return ((w as u32, h as u32, packed, [w / 2, 0]), colour, copy, fig);
             }
-            ((c.w as u32, c.h as u32, encode_g4(&bits, c.w as u32), [0, 0]), colour, copy([0, 0, c.w, c.h]))
+            let (copy, fig) = extra([0, 0, c.w, c.h]);
+            ((c.w as u32, c.h as u32, encode_g4(&bits, c.w as u32), [0, 0]), colour, copy, fig)
         })
         .collect();
     if cfg.timing {
@@ -1172,13 +1198,16 @@ fn canvas(slots: &[(u32, u32, Vec<u8>, [usize; 2])]) -> (usize, usize, usize, us
 }
 
 /// #82: a colour slot on white at the offset `compose` gives the 1-bit slot with anchor `a`; `lay` None = no --crop, the slot is the page.
-fn place_rgb(g: &Rgb, a: [usize; 2], lay: Option<(usize, usize, usize, usize, usize, usize)>) -> Rgb {
+/// #126: `g` at `k` x the output dpi, offset and canvas scaled by k (k = 1: exact), rounding overhang clipped.
+fn place_rgb(g: &Rgb, a: [usize; 2], lay: Option<(usize, usize, usize, usize, usize, usize)>, k: f32) -> Rgb {
     let Some((half, top, mx, my, cw, ch)) = lay else { return Rgb { w: g.w, h: g.h, px: g.px.clone() } };
-    let (ox, oy) = (mx + half - a[0], my + top - a[1]);
+    let sc = |v: usize| (v as f32 * k).round() as usize;
+    let (ox, oy, cw, ch) = (sc(mx + half - a[0]), sc(my + top - a[1]), sc(cw), sc(ch));
+    let (w, h) = ((g.w as usize).min(cw.saturating_sub(ox)), (g.h as usize).min(ch.saturating_sub(oy)));
     let mut px = vec![255u8; cw * ch * 3];
-    for y in 0..g.h as usize {
+    for y in 0..h {
         let (s, d) = (y * g.w as usize * 3, ((oy + y) * cw + ox) * 3);
-        px[d..d + g.w as usize * 3].copy_from_slice(&g.px[s..s + g.w as usize * 3]);
+        px[d..d + w * 3].copy_from_slice(&g.px[s..s + w * 3]);
     }
     Rgb { w: cw as u32, h: ch as u32, px }
 }
@@ -2295,7 +2324,7 @@ fn mineru_text(files: &[String], slots: &[Slot], dpi: f32) -> Vec<Vec<TextLine>>
         eprintln!("--mineru: {skipped} characters outside WinAnsi skipped");
     }
     if pages.len() != slots.len() {
-        eprintln!("Warning: --mineru: layout.json has {} pages but the output has {}: no text layer", pages.len(), slots.len());
+        eprintln!("Warning: --mineru: layout.json has {} pages but the output has {}: no text layer (use the same flags as the run MinerU read)", pages.len(), slots.len());
         return vec![];
     }
     pages
@@ -2325,19 +2354,16 @@ struct Fig {
     data: Vec<u8>,
 }
 
-/// #114: MinerU's figure boxes per output page, in output pt (top-left origin), padded by FIG_PAD_PT and kept on the page.
+/// #114: MinerU's pages in order as (page_size, figure boxes in MinerU's pt); fit_boxes puts them on the output pages.
 /// Only `image`/`chart` bodies: captions and footnotes are text, tables read better in 1-bit. Page count or size mismatch:
-/// no figures (mineru_text has already warned about the same files).
-fn mineru_figs(files: &[String], slots: &[Slot], dpi: f32) -> Vec<Vec<[f32; 4]>> {
+/// no figures (mineru_text warns about the same files).
+fn mineru_fig_pages(files: &[String]) -> Vec<(Vec<f32>, Vec<[f32; 4]>)> {
     let mut pages = vec![];
     for f in files {
         let j = json(&std::fs::read(f).unwrap_or_else(|e| die(&format!("{f}: {e}")))).unwrap_or_else(|| die(&format!("{f}: not valid JSON")));
         pages.extend(j.arr("pdf_info").iter().map(fig_boxes));
     }
-    if pages.len() != slots.len() {
-        return vec![];
-    }
-    pages.into_iter().zip(slots).map(|((sz, b), s)| fit_boxes(&sz, b, slot_pt(s, dpi))).collect()
+    pages
 }
 
 /// One `pdf_info` page: (page_size, figure body boxes in MinerU's pt).
@@ -2371,22 +2397,33 @@ fn fig_stats(g: &Rgb) -> (f32, f32) {
     if w == 0 || h == 0 {
         return (0.0, 0.0);
     }
-    let lum: Vec<i32> = g.px.chunks_exact(3).map(|p| (299 * p[0] as i32 + 587 * p[1] as i32 + 114 * p[2] as i32) / 1000).collect();
-    let colour = g.px.chunks_exact(3).filter(|p| p.iter().max().unwrap() - p.iter().min().unwrap() > 40).count();
-    let mut flat = 0;
-    for y in 1..h.saturating_sub(1) {
-        for x in 1..w.saturating_sub(1) {
-            if !(70..=190).contains(&lum[y * w + x]) {
-                continue;
-            }
-            let lum = &lum;
-            let n = (y - 1..=y + 1).flat_map(|yy| (x - 1..=x + 1).map(move |xx| lum[yy * w + xx]));
-            let (lo, hi) = n.fold((i32::MAX, i32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
-            flat += (hi - lo < 30) as usize;
-        }
-    }
+    let (colour, flat, _) = fig_counts(g, &lum(g), [0, 0, w, h]);
     let n = (w * h) as f32;
     (colour as f32 / n, flat as f32 / n)
+}
+
+fn lum(g: &Rgb) -> Vec<i32> {
+    g.px.chunks_exact(3).map(|p| (299 * p[0] as i32 + 587 * p[1] as i32 + 114 * p[2] as i32) / 1000).collect()
+}
+
+/// #124/#126: (coloured, flat mid-tone, either) pixels in region `r` = [x0, y0, x1, y1) of g, with g's `lum`; the
+/// 3x3 neighbourhood is taken from all of g, and g's own 1-pixel border is never flat.
+fn fig_counts(g: &Rgb, lum: &[i32], [x0, y0, x1, y1]: [usize; 4]) -> (usize, usize, usize) {
+    let (w, h) = (g.w as usize, g.h as usize);
+    let (mut colour, mut flat, mut either) = (0, 0, 0);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = &g.px[(y * w + x) * 3..(y * w + x) * 3 + 3];
+            let c = p.iter().max().unwrap() - p.iter().min().unwrap() > 40;
+            let f = x > 0 && y > 0 && x + 1 < w && y + 1 < h && (70..=190).contains(&lum[y * w + x]) && {
+                let n = (y - 1..=y + 1).flat_map(|yy| (x - 1..=x + 1).map(move |xx| lum[yy * w + xx]));
+                let (lo, hi) = n.fold((i32::MAX, i32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
+                hi - lo < 30
+            };
+            (colour, flat, either) = (colour + c as usize, flat + f as usize, either + (c || f) as usize);
+        }
+    }
+    (colour, flat, either)
 }
 
 /// #124: true when the box is line art: keep the page's 1-bit instead of a JPEG. Reused by #126.
@@ -2395,38 +2432,111 @@ fn fig_is_line_art(g: &Rgb) -> bool {
     c < FIG_COLOUR_MAX && f < FIG_FLAT_MAX
 }
 
-/// #114: the boxes cut from the page rendered in colour at JPEG_DPI, as q65 4:2:0 JPEGs like #76's colour pages.
-/// #124: boxes that are line art without colour are left out; their number is returned too.
-fn fig_jpegs(page: &Page, boxes: &[[f32; 4]]) -> (Vec<Fig>, usize) {
-    if boxes.is_empty() {
-        return (vec![], 0);
-    }
-    let t = page_rgb(page, FIG_TEST_DPI);
-    let ts = FIG_TEST_DPI / 72.0;
-    let line_art = |b: &[f32; 4]| {
-        let px = |v: f32, max: u32, f: fn(f32) -> f32| (f(v * ts) as u32).min(max) as usize;
-        let (x0, y0, x1, y1) = (px(b[0], t.w, f32::floor), px(b[1], t.h, f32::floor), px(b[2], t.w, f32::ceil), px(b[3], t.h, f32::ceil));
-        if x1 <= x0 || y1 <= y0 {
-            return false;
-        }
-        let w = t.w as usize;
-        let cut: Vec<u8> = (y0..y1).flat_map(|y| t.px[(y * w + x0) * 3..(y * w + x1) * 3].iter().copied()).collect();
-        fig_is_line_art(&Rgb { w: (x1 - x0) as u32, h: (y1 - y0) as u32, px: cut })
+// #126: on the 1-bit page MinerU can return a box smaller than the picture (Allan Poulsen p13 lost its red banner, p10
+// stopped 28 pt short of the right edge, #123). Grow each side while the strip just outside it is picture: colour or flat
+// grey (fig_counts), which paper and black-on-white text are not.
+const FIG_GROW_STEP_PT: f32 = 2.0; // strip width per step
+const FIG_GROW_MIN: f32 = 0.10; // share of picture pixels in the strip that moves the side out
+const FIG_GROW_MAX: f32 = 1.0; // a side moves at most this share of the box's size; still picture there = background, undone
+// ponytail: rules of thumb set on Allan Poulsen p10/p13 and checked on 30 MinerU files. A side that reaches FIG_GROW_MAX
+// with picture still beyond it ran into a coloured panel or page tint, not a picture's edge (Allan p37's orange panel,
+// 186 pt past a 150 pt limit; Læremidler p1's pale-green cover round a logo), so that side keeps MinerU's edge. 0.5 was too
+// short for Gyldendal's tiles: MinerU boxes only the illustration, the tile's own bottom is 29-40 pt below a 46-69 pt box.
+// Measure on more files before moving them.
+const FIG_GROW_SPARSE_STEPS: usize = 5; // a side grown further than this many strips (10 pt) ...
+const FIG_GROW_SPARSE_MEDIAN: f32 = 0.20; // ... through strips with a median picture share below this went into haze
+// ponytail: from 176 grown sides on 9 files (docs/mineru-figures.md): catches 5 of 27 bad sides (JEPPE p2/p3 haze, Haase p2,
+// Ingemann p7, Kopierne p9) and no good one. Tinted caption panels and pale-blue fields (Fought, Produktiv læring p2) share
+// 0.77-1.00 like real pictures and still grow: they need another signal (text ink in the strip, paper colour).
+
+/// #126: box `b` ([x0, y0, x1, y1) px of g) grown side by side while the strip outside is picture; `step` px per move.
+/// A side that hits the FIG_GROW_MAX limit inside the page with picture beyond it, or that grew more than
+/// FIG_GROW_SPARSE_STEPS strips with a median share under FIG_GROW_SPARSE_MEDIAN, goes back to b's edge.
+fn grow_box(g: &Rgb, lum: &[i32], b: [usize; 4], step: usize) -> [usize; 4] {
+    let (w, h) = (g.w as usize, g.h as usize);
+    let (mx, my) = (((b[2] - b[0]) as f32 * FIG_GROW_MAX) as usize, ((b[3] - b[1]) as f32 * FIG_GROW_MAX) as usize);
+    let lim = [b[0].saturating_sub(mx), b[1].saturating_sub(my), (b[2] + mx).min(w), (b[3] + my).min(h)];
+    let share = |r: [usize; 4]| {
+        let n = (r[2] - r[0]) * (r[3] - r[1]);
+        if n == 0 { 0.0 } else { fig_counts(g, lum, r).2 as f32 / n as f32 }
     };
-    let (keep, dropped): (Vec<[f32; 4]>, Vec<[f32; 4]>) = boxes.iter().partition(|b| !line_art(b));
-    let g = page_rgb(page, JPEG_DPI);
-    let s = JPEG_DPI / 72.0;
-    let figs = keep
-        .iter()
-        .filter_map(|b| {
-            let px = |v: f32, max: u32, f: fn(f32) -> f32| (f(v * s) as u32).min(max);
-            let (x0, y0, x1, y1) = (px(b[0], g.w, f32::floor), px(b[1], g.h, f32::floor), px(b[2], g.w, f32::ceil), px(b[3], g.h, f32::ceil));
-            let (w, h) = (x1.checked_sub(x0).filter(|&w| w > 0)?, y1.checked_sub(y0).filter(|&h| h > 0)?);
-            let cut: Vec<u8> = (y0..y1).flat_map(|y| g.px[((y * g.w + x0) * 3) as usize..((y * g.w + x1) * 3) as usize].iter().copied()).collect();
-            Some(Fig { b: [x0 as f32 / s, y0 as f32 / s, x1 as f32 / s, y1 as f32 / s], w, h, data: encode_jpeg(&Rgb { w, h, px: cut }, 65) })
-        })
-        .collect();
-    (figs, dropped.len())
+    let picture = |r: [usize; 4]| share(r) > FIG_GROW_MIN;
+    // e = [x0, y0, x1, y1]; side k's strip one step out, and how far it may go
+    let strip = |e: [usize; 4], k: usize| match k {
+        0 => [e[0].saturating_sub(step).max(lim[0]), e[1], e[0], e[3]],
+        1 => [e[0], e[1].saturating_sub(step).max(lim[1]), e[2], e[1]],
+        2 => [e[2], e[1], (e[2] + step).min(lim[2]), e[3]],
+        _ => [e[0], e[3], e[2], (e[3] + step).min(lim[3])],
+    };
+    let mut e = b;
+    let mut shares: [Vec<f32>; 4] = Default::default();
+    loop {
+        let mut grew = false;
+        for k in [0, 2, 1, 3] {
+            let r = strip(e, k);
+            let (moved, sh) = (if k % 2 == 0 { r[2] > r[0] } else { r[3] > r[1] }, share(r));
+            if moved && sh > FIG_GROW_MIN {
+                e[k] = r[k];
+                shares[k].push(sh);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    for k in 0..4 {
+        // unbounded: at the limit, not at the page edge, and the next strip out is still picture
+        let at_limit = e[k] == lim[k] && if k < 2 { lim[k] > 0 } else { lim[k] < [w, h][k - 2] };
+        let beyond = match k {
+            0 => [lim[0].saturating_sub(step), e[1], lim[0], e[3]],
+            1 => [e[0], lim[1].saturating_sub(step), e[2], lim[1]],
+            2 => [lim[2], e[1], (lim[2] + step).min(w), e[3]],
+            _ => [e[0], lim[3], e[2], (lim[3] + step).min(h)],
+        };
+        // sparse: a long way grown through strips that are mostly not picture (haze, a tinted edge)
+        let mut v = shares[k].clone();
+        v.sort_by(f32::total_cmp);
+        let sparse = v.len() > FIG_GROW_SPARSE_STEPS && v[v.len() / 2] < FIG_GROW_SPARSE_MEDIAN;
+        if (at_limit && picture(beyond)) || sparse {
+            e[k] = b[k];
+        }
+    }
+    e
+}
+
+/// #114: the boxes (output pt) cut from the output page's colour `[at JPEG_DPI, at FIG_TEST_DPI]` (#126), as q65 4:2:0
+/// JPEGs like #76's colour pages. #126: each box grown to the picture's edge on the FIG_TEST_DPI page first.
+/// #124: boxes that are line art without colour are left out. Returns (figures, boxes left out, boxes grown).
+fn fig_jpegs([g, t]: &[Rgb; 2], boxes: &[[f32; 4]]) -> (Vec<Fig>, usize, usize) {
+    let (s, ts) = (JPEG_DPI / 72.0, FIG_TEST_DPI / 72.0);
+    let px = |v: f32, k: f32, max: u32, f: fn(f32) -> f32| (f(v * k).max(0.0) as usize).min(max as usize);
+    let tl = lum(t);
+    let (mut figs, mut dropped, mut grown) = (vec![], 0, 0);
+    for b in boxes {
+        let tb = [px(b[0], ts, t.w, f32::floor), px(b[1], ts, t.h, f32::floor), px(b[2], ts, t.w, f32::ceil), px(b[3], ts, t.h, f32::ceil)];
+        if tb[2] <= tb[0] || tb[3] <= tb[1] {
+            continue;
+        }
+        let gb = grow_box(t, &tl, tb, (FIG_GROW_STEP_PT * ts).ceil() as usize);
+        grown += (gb != tb) as usize;
+        let tw = t.w as usize;
+        let cut: Vec<u8> = (gb[1]..gb[3]).flat_map(|y| t.px[(y * tw + gb[0]) * 3..(y * tw + gb[2]) * 3].iter().copied()).collect();
+        if fig_is_line_art(&Rgb { w: (gb[2] - gb[0]) as u32, h: (gb[3] - gb[1]) as u32, px: cut }) {
+            dropped += 1;
+            continue;
+        }
+        // the grown box only where it grew, so an ungrown side keeps MinerU's (padded) edge to the JPEG_DPI pixel
+        let e = [if gb[0] < tb[0] { gb[0] as f32 / ts } else { b[0] }, if gb[1] < tb[1] { gb[1] as f32 / ts } else { b[1] }, if gb[2] > tb[2] { gb[2] as f32 / ts } else { b[2] }, if gb[3] > tb[3] { gb[3] as f32 / ts } else { b[3] }];
+        let (x0, y0, x1, y1) = (px(e[0], s, g.w, f32::floor), px(e[1], s, g.h, f32::floor), px(e[2], s, g.w, f32::ceil), px(e[3], s, g.h, f32::ceil));
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        let (w, h, gw) = ((x1 - x0) as u32, (y1 - y0) as u32, g.w as usize);
+        let cut: Vec<u8> = (y0..y1).flat_map(|y| g.px[(y * gw + x0) * 3..(y * gw + x1) * 3].iter().copied()).collect();
+        figs.push(Fig { b: [x0 as f32 / s, y0 as f32 / s, x1 as f32 / s, y1 as f32 / s], w, h, data: encode_jpeg(&Rgb { w, h, px: cut }, 65) });
+    }
+    (figs, dropped, grown)
 }
 
 fn slot_pt(slot: &Slot, dpi: f32) -> (f32, f32) {
@@ -2548,6 +2658,50 @@ mod tests {
         assert!(fig_is_line_art(&lines) && !fig_is_line_art(&flat_grey) && !fig_is_line_art(&red));
     }
 
+    // #126: a box missing the red banner above its picture grows over the banner and stops at the paper; a box beside a
+    // column of black-on-white text does not grow into it.
+    #[test]
+    fn fig_box_grows_to_picture_edge() {
+        let (w, h) = (120u32, 120u32);
+        let g = Rgb {
+            w,
+            h,
+            px: (0..h).flat_map(|y| (0..w).flat_map(move |x| match (x, y) {
+                (20..60, 10..30) => [210, 30, 30],                                 // banner
+                (20..60, 30..90) => [90 + (x % 7) as u8 * 20, 120, 60],           // picture
+                (70..110, _) if y % 6 < 2 && x % 3 != 0 => [0, 0, 0],             // text column
+                _ => [255, 255, 255],
+            })).collect(),
+        };
+        let l = lum(&g);
+        // stops at the paper above the banner, within one step (and never moves into the text column on the right)
+        let b = grow_box(&g, &l, [20, 30, 60, 90], 3);
+        assert!(b[0] == 20 && (8..=10).contains(&b[1]) && b[2] == 60 && b[3] == 90, "{b:?}");
+        // 15 px tall -> at most 15 up, and the picture goes on past that: background, the side stays at MinerU's edge
+        assert_eq!(grow_box(&g, &l, [20, 75, 60, 90], 3)[1], 75);
+        // a box short of the picture's right edge grows to it (within one step), and stops before the text
+        let b = grow_box(&g, &l, [20, 30, 50, 90], 3);
+        assert!((60..=62).contains(&b[2]), "{b:?}");
+    }
+
+    // #126: a side that runs a long way through sparse colour (haze, a tinted edge) goes back to MinerU's edge; a short
+    // run through the same haze stays.
+    #[test]
+    fn fig_box_does_not_grow_into_haze() {
+        let (w, h) = (140u32, 80u32);
+        let g = Rgb {
+            w,
+            h,
+            px: (0..h).flat_map(|y| (0..w).flat_map(move |x| match (x, y) {
+                (20..60, 20..60) => [90 + (x % 7) as u8 * 20, 120, 60],       // picture
+                (60..100, 20..60) if (x + y) % 7 == 0 => [40, 90, 220],     // haze: 1 pixel in 7 coloured
+                _ => [255, 255, 255],
+            })).collect(),
+        };
+        let l = lum(&g);
+        assert_eq!(grow_box(&g, &l, [20, 20, 60, 60], 3)[2], 60);
+    }
+
     #[test]
     fn g4_pdf_roundtrip() {
         let (w, h, dpi) = (301u32, 207u32, 150.0);
@@ -2654,7 +2808,7 @@ mod tests {
         let lay = canvas(&slots);
         let (half, top, mx, my, cw, ch) = lay;
         let g = Rgb { w: 10, h: 6, px: vec![0; 10 * 6 * 3] };
-        let p = place_rgb(&g, [5, 2], Some(lay));
+        let p = place_rgb(&g, [5, 2], Some(lay), 1.0);
         assert_eq!((p.w as usize, p.h as usize), (cw, ch));
         let (x, y) = (mx + half - 5, my + top - 2);
         assert_eq!(p.px[(y * cw + x) * 3], 0);
