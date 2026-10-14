@@ -70,8 +70,10 @@ and gives neither text nor figures. Upload: Allan Poulsen 2 602 344 B instead of
   banner, p10 stopped 28 pt short, #123). Each side moves out by `FIG_GROW_STEP_PT` (2 pt) while more than `FIG_GROW_MIN`
   (10 %) of the strip just outside is colour or flat mid-tone (the two pixel tests of #124, `fig_counts`), at most
   `FIG_GROW_MAX` (50 %) of the box's size per side, never past the page. Paper and black-on-white text are neither, so a
-  box beside a text column stays put. A side that did not move keeps MinerU's padded edge. Known cost: on a slide with a
-  coloured background the box grows to the 50 % limit (bytes, not pictures).
+  box beside a text column stays put. A side that reaches the 50 % limit with picture still beyond it ran into a
+  coloured panel or page tint, not a picture's edge, and goes back to MinerU's edge (first measurement: Allan p37's orange
+  panel was cut to an L with its text doubled at the JPEG's edge; Læremidler p1's small KLIM logo became a big pale-green
+  field over a text line). A side that did not move keeps MinerU's padded edge.
 - **Line art:** `fig_is_line_art` on the grown box, cut from the `FIG_TEST_DPI` colour page. Without geometry flags that page
   is the same hayro render #124 measured (a zero-angle straighten is an exact shift); with `--deskew` it is bilinearly
   straightened, which the 13-file measurement above did not cover.

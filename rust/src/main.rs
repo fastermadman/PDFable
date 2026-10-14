@@ -2437,11 +2437,13 @@ fn fig_is_line_art(g: &Rgb) -> bool {
 // grey (fig_counts), which paper and black-on-white text are not.
 const FIG_GROW_STEP_PT: f32 = 2.0; // strip width per step
 const FIG_GROW_MIN: f32 = 0.10; // share of picture pixels in the strip that moves the side out
-const FIG_GROW_MAX: f32 = 0.5; // a side moves at most this share of the box's size
-// ponytail: rules of thumb set on Allan Poulsen p10/p13; a slide with a coloured background grows to FIG_GROW_MAX (bytes,
-// not pictures lost). Measure on more files before moving them.
+const FIG_GROW_MAX: f32 = 0.5; // a side moves at most this share of the box's size; still picture there = background, undone
+// ponytail: rules of thumb set on Allan Poulsen p10/p13 and checked on 30 MinerU files. A side that reaches FIG_GROW_MAX
+// with picture still beyond it ran into a coloured panel or page tint, not a picture's edge (Allan p37's orange panel,
+// Læremidler p1's pale-green field round a logo), so that side keeps MinerU's edge. Measure on more files before moving them.
 
 /// #126: box `b` ([x0, y0, x1, y1) px of g) grown side by side while the strip outside is picture; `step` px per move.
+/// A side that hits the FIG_GROW_MAX limit inside the page with picture beyond it goes back to b's edge.
 fn grow_box(g: &Rgb, lum: &[i32], b: [usize; 4], step: usize) -> [usize; 4] {
     let (w, h) = (g.w as usize, g.h as usize);
     let (mx, my) = (((b[2] - b[0]) as f32 * FIG_GROW_MAX) as usize, ((b[3] - b[1]) as f32 * FIG_GROW_MAX) as usize);
@@ -2470,9 +2472,23 @@ fn grow_box(g: &Rgb, lum: &[i32], b: [usize; 4], step: usize) -> [usize; 4] {
             (y1, grew) = (ny1, true);
         }
         if !grew {
-            return [x0, y0, x1, y1];
+            break;
         }
     }
+    // unbounded sides: at the limit, not at the page edge, and the next strip out is still picture
+    if x0 == lim[0] && lim[0] > 0 && picture([lim[0].saturating_sub(step), y0, lim[0], y1]) {
+        x0 = b[0];
+    }
+    if x1 == lim[2] && lim[2] < w && picture([lim[2], y0, (lim[2] + step).min(w), y1]) {
+        x1 = b[2];
+    }
+    if y0 == lim[1] && lim[1] > 0 && picture([x0, lim[1].saturating_sub(step), x1, lim[1]]) {
+        y0 = b[1];
+    }
+    if y1 == lim[3] && lim[3] < h && picture([x0, lim[3], x1, (lim[3] + step).min(h)]) {
+        y1 = b[3];
+    }
+    [x0, y0, x1, y1]
 }
 
 /// #114: the boxes (output pt) cut from the output page's colour `[at JPEG_DPI, at FIG_TEST_DPI]` (#126), as q65 4:2:0
@@ -2647,8 +2663,8 @@ mod tests {
         // stops at the paper above the banner, within one step (and never moves into the text column on the right)
         let b = grow_box(&g, &l, [20, 30, 60, 90], 3);
         assert!(b[0] == 20 && (8..=10).contains(&b[1]) && b[2] == 60 && b[3] == 90, "{b:?}");
-        // capped at FIG_GROW_MAX of the box's height: 50 px tall -> at most 25 up
-        assert_eq!(grow_box(&g, &l, [20, 40, 60, 90], 3)[1], 15);
+        // 50 px tall -> at most 25 up, and the banner goes on past that: background, the side stays at MinerU's edge
+        assert_eq!(grow_box(&g, &l, [20, 40, 60, 90], 3)[1], 40);
         // a box short of the picture's right edge grows to it (within one step), and stops before the text
         let b = grow_box(&g, &l, [20, 30, 50, 90], 3);
         assert!((60..=62).contains(&b[2]), "{b:?}");
