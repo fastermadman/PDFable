@@ -2437,10 +2437,12 @@ fn fig_is_line_art(g: &Rgb) -> bool {
 // grey (fig_counts), which paper and black-on-white text are not.
 const FIG_GROW_STEP_PT: f32 = 2.0; // strip width per step
 const FIG_GROW_MIN: f32 = 0.10; // share of picture pixels in the strip that moves the side out
-const FIG_GROW_MAX: f32 = 0.5; // a side moves at most this share of the box's size; still picture there = background, undone
+const FIG_GROW_MAX: f32 = 1.0; // a side moves at most this share of the box's size; still picture there = background, undone
 // ponytail: rules of thumb set on Allan Poulsen p10/p13 and checked on 30 MinerU files. A side that reaches FIG_GROW_MAX
 // with picture still beyond it ran into a coloured panel or page tint, not a picture's edge (Allan p37's orange panel,
-// Læremidler p1's pale-green field round a logo), so that side keeps MinerU's edge. Measure on more files before moving them.
+// 186 pt past a 150 pt limit; Læremidler p1's pale-green cover round a logo), so that side keeps MinerU's edge. 0.5 was too
+// short for Gyldendal's tiles: MinerU boxes only the illustration, the tile's own bottom is 29-40 pt below a 46-69 pt box.
+// Measure on more files before moving them.
 
 /// #126: box `b` ([x0, y0, x1, y1) px of g) grown side by side while the strip outside is picture; `step` px per move.
 /// A side that hits the FIG_GROW_MAX limit inside the page with picture beyond it goes back to b's edge.
@@ -2663,8 +2665,8 @@ mod tests {
         // stops at the paper above the banner, within one step (and never moves into the text column on the right)
         let b = grow_box(&g, &l, [20, 30, 60, 90], 3);
         assert!(b[0] == 20 && (8..=10).contains(&b[1]) && b[2] == 60 && b[3] == 90, "{b:?}");
-        // 50 px tall -> at most 25 up, and the banner goes on past that: background, the side stays at MinerU's edge
-        assert_eq!(grow_box(&g, &l, [20, 40, 60, 90], 3)[1], 40);
+        // 15 px tall -> at most 15 up, and the picture goes on past that: background, the side stays at MinerU's edge
+        assert_eq!(grow_box(&g, &l, [20, 75, 60, 90], 3)[1], 75);
         // a box short of the picture's right edge grows to it (within one step), and stops before the text
         let b = grow_box(&g, &l, [20, 30, 50, 90], 3);
         assert!((60..=62).contains(&b[2]), "{b:?}");
