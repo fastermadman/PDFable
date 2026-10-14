@@ -374,10 +374,12 @@ fn main() {
         eprintln!("--mineru: {} output pages from {n} input pages (split): no figures in colour", slots.len());
     }
     let figs = if cfg.mineru.is_empty() || !cfg.mineru_figs || slots.len() != n { vec![] } else { mineru_figs(&cfg.mineru, &slots, cfg.dpi) };
-    let figs: Vec<Vec<Fig>> = if figs.iter().all(Vec::is_empty) { vec![] } else { par_pages(&data, n, |p, i| fig_jpegs(p, &figs[i])) };
+    let figs: Vec<(Vec<Fig>, usize)> = if figs.iter().all(Vec::is_empty) { vec![] } else { par_pages(&data, n, |p, i| fig_jpegs(p, &figs[i])) };
+    let flat: usize = figs.iter().map(|f| f.1).sum();
+    let figs: Vec<Vec<Fig>> = figs.into_iter().map(|f| f.0).collect();
     if !figs.is_empty() {
         let (k, b) = figs.iter().flatten().fold((0, 0), |(k, b), f| (k + 1, b + f.data.len()));
-        println!("--mineru: {k} figures in colour, {b} B");
+        println!("--mineru: {k} figures in colour, {b} B; {flat} boxes without real colour kept as the page's 1-bit");
     }
     let pdf = write_slots(&slots, cfg.dpi, &texts, &figs);
     let (in_len, out_len) = (data.len(), pdf.len());
@@ -2354,14 +2356,67 @@ fn fit_boxes(sz: &[f32], b: Vec<[f32; 4]>, (pw, ph): (f32, f32)) -> Vec<[f32; 4]
     b.iter().map(|b| [(b[0] * sx - p).max(0.0), (b[1] * sy - p).max(0.0), (b[2] * sx + p).min(pw), (b[3] * sy + p).min(ph)]).filter(|b| b[2] > b[0] && b[3] > b[1]).collect()
 }
 
-/// #114: the boxes cut from the page rendered in colour at JPEG_DPI, as q65 4:2:0 JPEGs like #76's colour pages.
-fn fig_jpegs(page: &Page, boxes: &[[f32; 4]]) -> Vec<Fig> {
-    if boxes.is_empty() {
-        return vec![];
+// #124: a figure box with no real colour and no flat grey is line art (staves, buttons, drawings): the page's 1-bit
+// is already sharp there, a JPEG only costs bytes. Measured at 100 dpi on 343 boxes (docs/mineru-figures.md).
+const FIG_TEST_DPI: f32 = 100.0;
+const FIG_COLOUR_MAX: f32 = 0.01; // share of pixels with max-min of RGB > 40
+const FIG_FLAT_MAX: f32 = 0.015; // share of pixels in 70..=190 luminance whose 3x3 neighbourhood varies < 30 levels
+// ponytail: narrow margin (line art max 0.009, greyscale photo min 0.020) and only 100 dpi; re-run docs/mineru-figures.md's
+// measurement before moving either number, or before changing FIG_TEST_DPI.
+
+/// #124: (share of coloured pixels, share of flat mid-tone pixels) of an RGB box, both of all pixels in the box.
+/// The 1-pixel border has no full 3x3 neighbourhood and counts as not flat.
+fn fig_stats(g: &Rgb) -> (f32, f32) {
+    let (w, h) = (g.w as usize, g.h as usize);
+    if w == 0 || h == 0 {
+        return (0.0, 0.0);
     }
+    let lum: Vec<i32> = g.px.chunks_exact(3).map(|p| (299 * p[0] as i32 + 587 * p[1] as i32 + 114 * p[2] as i32) / 1000).collect();
+    let colour = g.px.chunks_exact(3).filter(|p| p.iter().max().unwrap() - p.iter().min().unwrap() > 40).count();
+    let mut flat = 0;
+    for y in 1..h.saturating_sub(1) {
+        for x in 1..w.saturating_sub(1) {
+            if !(70..=190).contains(&lum[y * w + x]) {
+                continue;
+            }
+            let lum = &lum;
+            let n = (y - 1..=y + 1).flat_map(|yy| (x - 1..=x + 1).map(move |xx| lum[yy * w + xx]));
+            let (lo, hi) = n.fold((i32::MAX, i32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
+            flat += (hi - lo < 30) as usize;
+        }
+    }
+    let n = (w * h) as f32;
+    (colour as f32 / n, flat as f32 / n)
+}
+
+/// #124: true when the box is line art: keep the page's 1-bit instead of a JPEG. Reused by #126.
+fn fig_is_line_art(g: &Rgb) -> bool {
+    let (c, f) = fig_stats(g);
+    c < FIG_COLOUR_MAX && f < FIG_FLAT_MAX
+}
+
+/// #114: the boxes cut from the page rendered in colour at JPEG_DPI, as q65 4:2:0 JPEGs like #76's colour pages.
+/// #124: boxes that are line art without colour are left out; their number is returned too.
+fn fig_jpegs(page: &Page, boxes: &[[f32; 4]]) -> (Vec<Fig>, usize) {
+    if boxes.is_empty() {
+        return (vec![], 0);
+    }
+    let t = page_rgb(page, FIG_TEST_DPI);
+    let ts = FIG_TEST_DPI / 72.0;
+    let line_art = |b: &[f32; 4]| {
+        let px = |v: f32, max: u32, f: fn(f32) -> f32| (f(v * ts) as u32).min(max) as usize;
+        let (x0, y0, x1, y1) = (px(b[0], t.w, f32::floor), px(b[1], t.h, f32::floor), px(b[2], t.w, f32::ceil), px(b[3], t.h, f32::ceil));
+        if x1 <= x0 || y1 <= y0 {
+            return false;
+        }
+        let w = t.w as usize;
+        let cut: Vec<u8> = (y0..y1).flat_map(|y| t.px[(y * w + x0) * 3..(y * w + x1) * 3].iter().copied()).collect();
+        fig_is_line_art(&Rgb { w: (x1 - x0) as u32, h: (y1 - y0) as u32, px: cut })
+    };
+    let (keep, dropped): (Vec<[f32; 4]>, Vec<[f32; 4]>) = boxes.iter().partition(|b| !line_art(b));
     let g = page_rgb(page, JPEG_DPI);
     let s = JPEG_DPI / 72.0;
-    boxes
+    let figs = keep
         .iter()
         .filter_map(|b| {
             let px = |v: f32, max: u32, f: fn(f32) -> f32| (f(v * s) as u32).min(max);
@@ -2370,7 +2425,8 @@ fn fig_jpegs(page: &Page, boxes: &[[f32; 4]]) -> Vec<Fig> {
             let cut: Vec<u8> = (y0..y1).flat_map(|y| g.px[((y * g.w + x0) * 3) as usize..((y * g.w + x1) * 3) as usize].iter().copied()).collect();
             Some(Fig { b: [x0 as f32 / s, y0 as f32 / s, x1 as f32 / s, y1 as f32 / s], w, h, data: encode_jpeg(&Rgb { w, h, px: cut }, 65) })
         })
-        .collect()
+        .collect();
+    (figs, dropped.len())
 }
 
 fn slot_pt(slot: &Slot, dpi: f32) -> (f32, f32) {
@@ -2480,6 +2536,16 @@ mod tests {
         let p = FIG_PAD_PT;
         assert_eq!(fit_boxes(&sz, b.clone(), (100.0, 200.0)), vec![[0.0, 10.0 - p, 50.0 + p, 60.0 + p]]);
         assert!(fit_boxes(&sz, b, (200.0, 100.0)).is_empty());
+    }
+
+    // #124: black-and-white line art is dropped; a flat grey area or real colour is kept.
+    #[test]
+    fn fig_line_art_test() {
+        let rgb = |f: &dyn Fn(u32, u32) -> [u8; 3]| Rgb { w: 40, h: 40, px: (0..40u32).flat_map(|y| (0..40u32).flat_map(move |x| f(x, y))).collect::<Vec<_>>() };
+        let lines = rgb(&|x, _| if x % 8 == 0 { [0; 3] } else { [255; 3] });
+        let flat_grey = rgb(&|_, _| [128; 3]);
+        let red = rgb(&|x, _| if x < 4 { [220, 20, 20] } else { [255; 3] });
+        assert!(fig_is_line_art(&lines) && !fig_is_line_art(&flat_grey) && !fig_is_line_art(&red));
     }
 
     #[test]

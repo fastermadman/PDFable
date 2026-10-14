@@ -29,3 +29,23 @@ stderr. Cost of auto: +98 % over 1-bit on the split Allan Poulsen (2 602 344 -> 
 
 Figures are 150 dpi against sources of 300 dpi (Allan Poulsen) and 200 dpi (Materialitet): never upscaled. MinerU's own
 returned PDF (`*_origin.pdf`) is a copy of the upload, so it is no size reference.
+
+## Line art stays 1-bit (#124)
+
+A figure box with no real colour and no flat grey is not cut as a JPEG: the page's own 1-bit is already sharp there (sheet
+music, buttons, line drawings, flowcharts). Test per box, on the page rendered at 100 dpi (`FIG_TEST_DPI`):
+
+- colour share < 1 %: pixels with max-min of RGB > 40 (`FIG_COLOUR_MAX`);
+- flat mid-tone share < 1.5 %: pixels with luminance 70-190 whose 3x3 neighbourhood varies by less than 30 levels
+  (`FIG_FLAT_MAX`). Shares are of all pixels in the box.
+
+Both must hold, then the box is dropped. The first idea (near-binary > 90 %) lost a greyscale photo and kept 21 line-art boxes in
+colour (#123, `docs/mineru-geometry.md` question 4). Margin is narrow: line art at most 0.009, greyscale photos at least 0.020,
+measured at 100 dpi only. Re-run the measurement before moving a number. The test lives in `fig_is_line_art` (`fig_stats` gives
+the two shares), so #126 can use the same function. The thresholds are constants, not options.
+
+Colour limit 1 %, not 2 %: PDFable's own renderer (hayro) measures less colour than pdftoppm. On the 13 files 2 % dropped the
+pale-blue vacuum cleaner on Uge 38 p19 (2.4 % in pdftoppm); 1 % keeps it and gives #123's 19 dropped for Uge 38. The price is one
+extra box on Haase p2 (a black-and-white skull drawing with a thin blue line from the box above, 1-2 % in hayro) that becomes a
+JPEG: +6 KB, nothing lost. Both boxes sit in the same 1-2 % band, so no limit in between separates them. Raising the limit
+drops more boxes (3 % also dropped a coffee machine and keys on Uge 38 p19).
