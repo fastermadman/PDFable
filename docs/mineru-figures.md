@@ -35,7 +35,7 @@ returned PDF (`*_origin.pdf`) is a copy of the upload, so it is no size referenc
 A figure box with no real colour and no flat grey is not cut as a JPEG: the page's own 1-bit is already sharp there (sheet
 music, buttons, line drawings, flowcharts). Test per box, on the page rendered at 100 dpi (`FIG_TEST_DPI`):
 
-- colour share < 2 %: pixels with max-min of RGB > 40 (`FIG_COLOUR_MAX`);
+- colour share < 3 %: pixels with max-min of RGB > 40 (`FIG_COLOUR_MAX`);
 - flat mid-tone share < 1.5 %: pixels with luminance 70-190 whose 3x3 neighbourhood varies by less than 30 levels
   (`FIG_FLAT_MAX`). Shares are of all pixels in the box.
 

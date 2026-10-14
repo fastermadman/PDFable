@@ -2357,9 +2357,9 @@ fn fit_boxes(sz: &[f32], b: Vec<[f32; 4]>, (pw, ph): (f32, f32)) -> Vec<[f32; 4]
 }
 
 // #124: a figure box with no real colour and no flat grey is line art (staves, buttons, drawings): the page's 1-bit
-// is already sharp there, a JPEG only costs bytes. Measured at 100 dpi on 343 boxes (docs/mineru-figures.md).
+// is already sharp there, a JPEG only costs bytes. Measured at 100 dpi on 343 boxes (colour 3 %: Uge 38 p19 vacuum cleaner has 2.4 % in pdftoppm, just under 2 % in hayro) (docs/mineru-figures.md).
 const FIG_TEST_DPI: f32 = 100.0;
-const FIG_COLOUR_MAX: f32 = 0.02; // share of pixels with max-min of RGB > 40
+const FIG_COLOUR_MAX: f32 = 0.03; // share of pixels with max-min of RGB > 40
 const FIG_FLAT_MAX: f32 = 0.015; // share of pixels in 70..=190 luminance whose 3x3 neighbourhood varies < 30 levels
 // ponytail: narrow margin (line art max 0.009, greyscale photo min 0.020) and only 100 dpi; re-run docs/mineru-figures.md's
 // measurement before moving either number, or before changing FIG_TEST_DPI.
