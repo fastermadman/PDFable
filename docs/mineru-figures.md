@@ -81,9 +81,15 @@ and gives neither text nor figures. Upload: Allan Poulsen 2 602 344 B instead of
   stops 5 bad sides (JEPPE p2 left, p3 top, Haase p2's skull right, Ingemann p7 bottom, Kopierne p9 handle right) and no
   good one; no single share threshold separates the rest (the leading-strip rule at 20 % keeps 91 % of good growth and
   59 % of bad).
+- **Result on the final rules** (main vs this route, contact sheets by eye): better on Allan p10, p13 (banner), p37 (orange
+  panel whole), Gyldendal's tiles, Kopierne's spreads, Haase p2; worse on JEPPE p2/p3 (colour haze beside the photos),
+  Kopierne p9 (a grey haze square round the door handle), Produktiv læring p2 and Fought's captions. No figure lost; no
+  file grew more than 10 % over main (the largest relative growth is Gyldendal, 526 912 -> 578 559 B, +9.8 %).
 - **Known limits of the growth:** tinted caption panels and pale-blue fields count as picture (shares 0.77-1.00, like real
   pictures), so Fought's captions (11 bottoms) and Produktiv læring p2's blue field over the caption and gutter are grown
-  into; JEPPE p2 right / p3 left haze (median 0.38-0.41) too. A grey scan strip that runs to the page edge is grown into
+  into; JEPPE p2 right / p3 left haze (median 0.38-0.41) and the Kopierne p9 handle (0.56/0.57) too. Paper share, edge
+  density and luminance spread in the strip were tried as extra signals; good and bad sides overlap on all three.
+  A grey scan strip that runs to the page edge is grown into
   (Læremidler p65). Very dark tiles (Gyldendal Historie/Madkundskab: max-min 9-17, luminance 52-74) are neither colour
   nor flat mid-tone and do not grow.
 - **Line art:** `fig_is_line_art` on the grown box, cut from the `FIG_TEST_DPI` colour page. Without geometry flags that page
