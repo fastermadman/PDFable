@@ -2443,54 +2443,66 @@ const FIG_GROW_MAX: f32 = 1.0; // a side moves at most this share of the box's s
 // 186 pt past a 150 pt limit; Læremidler p1's pale-green cover round a logo), so that side keeps MinerU's edge. 0.5 was too
 // short for Gyldendal's tiles: MinerU boxes only the illustration, the tile's own bottom is 29-40 pt below a 46-69 pt box.
 // Measure on more files before moving them.
+const FIG_GROW_SPARSE_STEPS: usize = 5; // a side grown further than this many strips (10 pt) ...
+const FIG_GROW_SPARSE_MEDIAN: f32 = 0.20; // ... through strips with a median picture share below this went into haze
+// ponytail: from 176 grown sides on 9 files (docs/mineru-figures.md): catches 5 of 27 bad sides (JEPPE p2/p3 haze, Haase p2,
+// Ingemann p7, Kopierne p9) and no good one. Tinted caption panels and pale-blue fields (Fought, Produktiv læring p2) share
+// 0.77-1.00 like real pictures and still grow: they need another signal (text ink in the strip, paper colour).
 
 /// #126: box `b` ([x0, y0, x1, y1) px of g) grown side by side while the strip outside is picture; `step` px per move.
-/// A side that hits the FIG_GROW_MAX limit inside the page with picture beyond it goes back to b's edge.
+/// A side that hits the FIG_GROW_MAX limit inside the page with picture beyond it, or that grew more than
+/// FIG_GROW_SPARSE_STEPS strips with a median share under FIG_GROW_SPARSE_MEDIAN, goes back to b's edge.
 fn grow_box(g: &Rgb, lum: &[i32], b: [usize; 4], step: usize) -> [usize; 4] {
     let (w, h) = (g.w as usize, g.h as usize);
     let (mx, my) = (((b[2] - b[0]) as f32 * FIG_GROW_MAX) as usize, ((b[3] - b[1]) as f32 * FIG_GROW_MAX) as usize);
     let lim = [b[0].saturating_sub(mx), b[1].saturating_sub(my), (b[2] + mx).min(w), (b[3] + my).min(h)];
-    let picture = |r: [usize; 4]| {
+    let share = |r: [usize; 4]| {
         let n = (r[2] - r[0]) * (r[3] - r[1]);
-        n > 0 && fig_counts(g, lum, r).2 as f32 > FIG_GROW_MIN * n as f32
+        if n == 0 { 0.0 } else { fig_counts(g, lum, r).2 as f32 / n as f32 }
     };
-    let [mut x0, mut y0, mut x1, mut y1] = b;
+    let picture = |r: [usize; 4]| share(r) > FIG_GROW_MIN;
+    // e = [x0, y0, x1, y1]; side k's strip one step out, and how far it may go
+    let strip = |e: [usize; 4], k: usize| match k {
+        0 => [e[0].saturating_sub(step).max(lim[0]), e[1], e[0], e[3]],
+        1 => [e[0], e[1].saturating_sub(step).max(lim[1]), e[2], e[1]],
+        2 => [e[2], e[1], (e[2] + step).min(lim[2]), e[3]],
+        _ => [e[0], e[3], e[2], (e[3] + step).min(lim[3])],
+    };
+    let mut e = b;
+    let mut shares: [Vec<f32>; 4] = Default::default();
     loop {
         let mut grew = false;
-        let nx0 = x0.saturating_sub(step).max(lim[0]);
-        if nx0 < x0 && picture([nx0, y0, x0, y1]) {
-            (x0, grew) = (nx0, true);
-        }
-        let nx1 = (x1 + step).min(lim[2]);
-        if nx1 > x1 && picture([x1, y0, nx1, y1]) {
-            (x1, grew) = (nx1, true);
-        }
-        let ny0 = y0.saturating_sub(step).max(lim[1]);
-        if ny0 < y0 && picture([x0, ny0, x1, y0]) {
-            (y0, grew) = (ny0, true);
-        }
-        let ny1 = (y1 + step).min(lim[3]);
-        if ny1 > y1 && picture([x0, y1, x1, ny1]) {
-            (y1, grew) = (ny1, true);
+        for k in [0, 2, 1, 3] {
+            let r = strip(e, k);
+            let (moved, sh) = (if k % 2 == 0 { r[2] > r[0] } else { r[3] > r[1] }, share(r));
+            if moved && sh > FIG_GROW_MIN {
+                e[k] = r[k];
+                shares[k].push(sh);
+                grew = true;
+            }
         }
         if !grew {
             break;
         }
     }
-    // unbounded sides: at the limit, not at the page edge, and the next strip out is still picture
-    if x0 == lim[0] && lim[0] > 0 && picture([lim[0].saturating_sub(step), y0, lim[0], y1]) {
-        x0 = b[0];
+    for k in 0..4 {
+        // unbounded: at the limit, not at the page edge, and the next strip out is still picture
+        let at_limit = e[k] == lim[k] && if k < 2 { lim[k] > 0 } else { lim[k] < [w, h][k - 2] };
+        let beyond = match k {
+            0 => [lim[0].saturating_sub(step), e[1], lim[0], e[3]],
+            1 => [e[0], lim[1].saturating_sub(step), e[2], lim[1]],
+            2 => [lim[2], e[1], (lim[2] + step).min(w), e[3]],
+            _ => [e[0], lim[3], e[2], (lim[3] + step).min(h)],
+        };
+        // sparse: a long way grown through strips that are mostly not picture (haze, a tinted edge)
+        let mut v = shares[k].clone();
+        v.sort_by(f32::total_cmp);
+        let sparse = v.len() > FIG_GROW_SPARSE_STEPS && v[v.len() / 2] < FIG_GROW_SPARSE_MEDIAN;
+        if (at_limit && picture(beyond)) || sparse {
+            e[k] = b[k];
+        }
     }
-    if x1 == lim[2] && lim[2] < w && picture([lim[2], y0, (lim[2] + step).min(w), y1]) {
-        x1 = b[2];
-    }
-    if y0 == lim[1] && lim[1] > 0 && picture([x0, lim[1].saturating_sub(step), x1, lim[1]]) {
-        y0 = b[1];
-    }
-    if y1 == lim[3] && lim[3] < h && picture([x0, lim[3], x1, (lim[3] + step).min(h)]) {
-        y1 = b[3];
-    }
-    [x0, y0, x1, y1]
+    e
 }
 
 /// #114: the boxes (output pt) cut from the output page's colour `[at JPEG_DPI, at FIG_TEST_DPI]` (#126), as q65 4:2:0
@@ -2670,6 +2682,24 @@ mod tests {
         // a box short of the picture's right edge grows to it (within one step), and stops before the text
         let b = grow_box(&g, &l, [20, 30, 50, 90], 3);
         assert!((60..=62).contains(&b[2]), "{b:?}");
+    }
+
+    // #126: a side that runs a long way through sparse colour (haze, a tinted edge) goes back to MinerU's edge; a short
+    // run through the same haze stays.
+    #[test]
+    fn fig_box_does_not_grow_into_haze() {
+        let (w, h) = (140u32, 80u32);
+        let g = Rgb {
+            w,
+            h,
+            px: (0..h).flat_map(|y| (0..w).flat_map(move |x| match (x, y) {
+                (20..60, 20..60) => [90 + (x % 7) as u8 * 20, 120, 60],       // picture
+                (60..100, 20..60) if (x + y) % 7 == 0 => [40, 90, 220],     // haze: 1 pixel in 7 coloured
+                _ => [255, 255, 255],
+            })).collect(),
+        };
+        let l = lum(&g);
+        assert_eq!(grow_box(&g, &l, [20, 20, 60, 60], 3)[2], 60);
     }
 
     #[test]

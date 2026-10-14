@@ -75,7 +75,17 @@ and gives neither text nor figures. Upload: Allan Poulsen 2 602 344 B instead of
   panel was cut to an L with its text doubled at the JPEG's edge; Læremidler p1's small KLIM logo became a big pale-green
   field over a text line). The limit was 50 % first; that cut Gyldendal's subject tiles through their label, because
   MinerU boxes only the illustration and the tile's bottom lies 29-40 pt below a 46-69 pt box. A side that did not move
-  keeps MinerU's padded edge. Known limit: a grey scan strip that runs to the page edge is grown into (Læremidler p65).
+  keeps MinerU's padded edge. A side that grew more than 5 strips (10 pt) with a median picture share under 20 % went
+  through haze or a tinted edge and goes back too. Measured on 176 grown sides (Allan with flags; JEPPE, Produktiv læring,
+  Haase, Gyldendal, Kopierne, Fought, copy.pdf, Ingemann without): 124 good, 27 bad, 25 unsure by eye. The median rule
+  stops 5 bad sides (JEPPE p2 left, p3 top, Haase p2's skull right, Ingemann p7 bottom, Kopierne p9 handle right) and no
+  good one; no single share threshold separates the rest (the leading-strip rule at 20 % keeps 91 % of good growth and
+  59 % of bad).
+- **Known limits of the growth:** tinted caption panels and pale-blue fields count as picture (shares 0.77-1.00, like real
+  pictures), so Fought's captions (11 bottoms) and Produktiv læring p2's blue field over the caption and gutter are grown
+  into; JEPPE p2 right / p3 left haze (median 0.38-0.41) too. A grey scan strip that runs to the page edge is grown into
+  (Læremidler p65). Very dark tiles (Gyldendal Historie/Madkundskab: max-min 9-17, luminance 52-74) are neither colour
+  nor flat mid-tone and do not grow.
 - **Line art:** `fig_is_line_art` on the grown box, cut from the `FIG_TEST_DPI` colour page. Without geometry flags that page
   is the same hayro render #124 measured (a zero-angle straighten is an exact shift); with `--deskew` it is bilinearly
   straightened, which the 13-file measurement above did not cover.
