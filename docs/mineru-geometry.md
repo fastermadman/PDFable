@@ -83,8 +83,14 @@ looked at on contact sheets.
   tripped by paper tint here (higher values only on slides/pages with coloured backgrounds: JEPPE 17, Kopierne 51,
   Ingemann 57).
 
-**5. Recommendation: build (a) only, which is #121; do not build (b).** Keep MinerU's boxes and decide colour ourselves
-per box with the flat mid-tone test (#124, threshold 1.5 % instead of near-binary 90 %). No new issues: #121 and #124 cover
-it. (b) would add ONNX Runtime and a 5-214 MB model for boxes we already get, and not remove the upload.
+**5. Recommendation: do not build (b); send MinerU the 1-bit output instead (#126), which makes (a)/#121 unnecessary.**
+Keep MinerU's boxes and decide colour ourselves per box with the flat mid-tone test (#124, threshold 1.5 % instead of
+near-binary 90 %). (b) would add ONNX Runtime and a 5-214 MB model for boxes we already get.
+
+Follow-up test (2026-10-14, batch `2f9395f4-…`): MinerU on `pdfable --rotate --crop --split auto --deskew` output.
+Allan Poulsen 2 602 344 B against 48 860 813 B for the colour copy; all 18 figures found again (box overlap ≥ 0.5, 14 at
+≥ 0.86), text word similarity 0.9898; Materialitet 5 of 5 figures, 0.9932. The boxes already fit the output pages, so no
+mapping. Catch: on 1-bit two boxes came back smaller than the picture (Allan p13 loses the red banner at the top, p10 stops
+about 28 pt short), so #126 grows each box to the picture's edge on PDFable's own colour page. Details on #123.
 
 Measurement scripts, numbers and contact sheets: `~/Developer/PDFable-123-sheets/` (not committed).
