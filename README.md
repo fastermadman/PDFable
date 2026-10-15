@@ -70,6 +70,7 @@ $B --rotate --crop --split auto --deskew reading-list.pdf
 | `--crop` | Trims scanner/microfilm borders. Trims each page to its text block (dark scanner borders are ignored), then centres every page on a canvas the size of the largest text block, so all pages come out the same size. |
 | `--split auto\|off\|N%` | Cuts two-page spreads into separate pages. `auto` detects double pages and the gutter (spine) position per page, using the document-wide median as a fallback for pages it isn't sure about. `N%` (e.g. `--split 52%`) skips detection and forces the gutter at that position on every double-shaped page — use it when `auto` gets a document wrong. Default `off`. |
 | `--deskew` | Straightens each resulting page (small-angle rotation), after splitting. |
+| `--classify` | Writes nothing; prints one letter per page: `D` (digital: the page draws visible text, at least 30 glyphs or no page-sized image) or `S` (scan: no visible text, or a few glyphs such as a page number on a page-sized image). Invisible OCR text does not count, so a scan with an OCR layer is `S`. For callers that want to leave digital PDFs alone (ItsWiz #281). |
 
 Double-page detection is a best-effort heuristic (aspect ratio + a column-brightness profile of the
 page, looking for the gap between the two text blocks). It's deliberately conservative: a normal

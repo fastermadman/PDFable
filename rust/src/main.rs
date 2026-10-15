@@ -3,6 +3,7 @@
 //   pdfable [--rotate] [--crop] [--split auto|off|N%] [--deskew] [--colour-pages LIST|all|none] input.pdf [output.pdf] [threshold%=60] [dpi=300]
 // MODE=images (as pdfable.sh) = --colour-pages all: every page colour JPEG, default output <input>.shrunk.pdf.
 // PROGRESS_FILE=<path>: one line per finished page is appended (droplet). --page-count input.pdf prints the page count.
+// --classify input.pdf prints one letter per page, D (digital: visible text) or S (scan), for the caller to decide (#281).
 // PDFABLE_TIMING=1 prints per-page geometry and stage times (ms) to stderr; PDFABLE_RENDER=1 always renders.
 // A/B knobs for the pipeline-order questions of #29 (docs/rust-port.md section 2):
 //   PDFABLE_ADPI=<dpi>      analysis (crop/gutter) resolution, default = dpi (150 flips crop decisions, section 2)
@@ -200,6 +201,7 @@ fn main() {
         Ok(m) => die(&format!("MODE must be text or images, not {m}")),
     }
     let mut count = false;
+    let mut classify = false;
     let mut pos = vec![];
     let mut eval = false;
     let mut detect = false;
@@ -234,6 +236,7 @@ fn main() {
                 _ => die("--mineru-figures auto|off"),
             },
             "--page-count" => count = true,
+            "--classify" => classify = true,
             s if s.starts_with("--") => die(&format!("{s}: unknown option")),
             _ => pos.push(a.clone()),
         }
@@ -262,6 +265,9 @@ fn main() {
     let n = Pdf::new(data.clone()).unwrap_or_else(|e| die(&format!("{input}: {e:?}"))).pages().len();
     if count {
         return println!("{n}");
+    }
+    if classify {
+        return println!("{}", par_pages(&data, n, |p, _| if page_is_digital(p) { 'D' } else { 'S' }).into_iter().collect::<String>());
     }
     if eval {
         return osd_eval(&data, n);
@@ -1366,6 +1372,50 @@ impl<'a> Device<'a> for Probe {
     }
     fn pop_clip_path(&mut self) {}
     fn pop_transparency_group(&mut self) {}
+}
+
+// #281: a page is digital when it draws visible text and is not a scan with a stamp on it. Invisible OCR text (Tr 3) does not
+// count, so a scan with a (poor) OCR layer stays a scan. Visible text on a page-sized image counts only from DIGITAL_MIN_GLYPHS
+// glyphs up (a page number or stamp on a scan is a few glyphs; a text page is hundreds).
+// ponytail: a digital slide with a full-page background image and a short title is called a scan (it then takes the scan path as
+// before); lower the number or measure the image's share of the page differently if that shows up. Glyphs hidden by a clip or
+// drawn in white are not told apart from visible ones.
+const DIGITAL_MIN_GLYPHS: u32 = 30;
+const SCAN_IMAGE_SHARE: f64 = 0.9;
+
+/// Device that counts visible glyphs and notes whether one image covers (nearly) the whole page, without decoding any image.
+struct Classify {
+    w: f64,
+    h: f64,
+    glyphs: u32,
+    big_image: bool,
+}
+
+impl<'a> Device<'a> for Classify {
+    fn set_soft_mask(&mut self, _: Option<SoftMask<'a>>) {}
+    fn set_blend_mode(&mut self, _: BlendMode) {}
+    fn draw_path(&mut self, _: &BezPath, _: Affine, _: &Paint<'a>, _: &PathDrawMode) {}
+    fn push_clip_path(&mut self, _: &ClipPath) {}
+    fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'a>>, _: BlendMode) {}
+    fn draw_glyph(&mut self, _: &Glyph<'a>, _: Affine, _: Affine, _: &Paint<'a>, m: &GlyphDrawMode) {
+        self.glyphs += !matches!(m, GlyphDrawMode::Invisible) as u32;
+    }
+    fn draw_image(&mut self, image: Image<'a, '_>, t: Affine) {
+        let bb = t.transform_rect_bbox(kurbo::Rect::new(0.0, 0.0, image.width() as f64, image.height() as f64));
+        let (dx, dy) = ((bb.x1.min(self.w) - bb.x0.max(0.0)).max(0.0), (bb.y1.min(self.h) - bb.y0.max(0.0)).max(0.0));
+        self.big_image |= dx * dy >= SCAN_IMAGE_SHARE * self.w * self.h;
+    }
+    fn pop_clip_path(&mut self) {}
+    fn pop_transparency_group(&mut self) {}
+}
+
+fn page_is_digital(page: &Page) -> bool {
+    let (w, h) = page.render_dimensions();
+    let mut probe = Classify { w: w as f64, h: h as f64, glyphs: 0, big_image: false };
+    let ic = InterpreterCache::new();
+    let mut ctx = Context::new(page.initial_transform(true).to_kurbo(), Rect::new(0.0, 0.0, w as f64, h as f64), &ic, page.xref(), InterpreterSettings::default());
+    interpret_page(page, &mut ctx, &mut probe);
+    probe.glyphs >= DIGITAL_MIN_GLYPHS || (probe.glyphs > 0 && !probe.big_image)
 }
 
 /// Nearest-neighbour map of the image onto the w x h page through t (image px -> page px).
@@ -2799,6 +2849,48 @@ mod tests {
         pdf.stream(Ref::new(6), &c.finish());
         let doc = Pdf::new(Arc::new(pdf.finish())).unwrap();
         assert_eq!(page_gray(&doc.pages()[0], 72.0, false).1, "render");
+    }
+
+    /// A 200 x 100 pt page with a page-sized image, optionally `text` shown on it (visible or invisible).
+    fn scan_with_text(text: &[u8], invisible: bool) -> Vec<u8> {
+        use pdf_writer::types::TextRenderingMode;
+        use pdf_writer::{Content, Name, Pdf as Writer, Rect, Ref, Str};
+        let mut pdf = Writer::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        pdf.pages(Ref::new(2)).kids([Ref::new(3)]).count(1);
+        let mut page = pdf.page(Ref::new(3));
+        page.parent(Ref::new(2)).media_box(Rect::new(0.0, 0.0, 200.0, 100.0)).contents(Ref::new(6));
+        let mut res = page.resources();
+        res.x_objects().pair(Name(b"Im0"), Ref::new(5));
+        res.fonts().pair(Name(b"F1"), Ref::new(4));
+        drop(res);
+        drop(page);
+        pdf.type1_font(Ref::new(4)).base_font(Name(b"Helvetica"));
+        let gray = vec![200u8; 200 * 100];
+        let mut img = pdf.image_xobject(Ref::new(5), &gray);
+        img.width(200).height(100).bits_per_component(8);
+        img.color_space().device_gray();
+        drop(img);
+        let mut c = Content::new();
+        c.save_state().transform([200.0, 0.0, 0.0, 100.0, 0.0, 0.0]).x_object(Name(b"Im0")).restore_state();
+        c.begin_text().set_font(Name(b"F1"), 6.0);
+        if invisible {
+            c.set_text_rendering_mode(TextRenderingMode::Invisible);
+        }
+        c.set_text_matrix([1.0, 0.0, 0.0, 1.0, 5.0, 50.0]).show(Str(text)).end_text();
+        pdf.stream(Ref::new(6), &c.finish());
+        pdf.finish()
+    }
+
+    // #281: visible text makes a page digital; a page-sized image with only invisible OCR text or a stamp is a scan.
+    #[test]
+    fn classify_digital_and_scan_pages() {
+        let digital = |bytes: Vec<u8>| page_is_digital(&Pdf::new(Arc::new(bytes)).unwrap().pages()[0]);
+        assert!(digital(vector_two_column_pdf()), "a text page");
+        let words = b"The quick brown fox jumps over the lazy dog";
+        assert!(!digital(scan_with_text(words, true)), "invisible OCR text on a scan");
+        assert!(!digital(scan_with_text(b"12", false)), "a page number on a scan");
+        assert!(digital(scan_with_text(words, false)), "a page of visible text over a full-page image");
     }
 
     // #82: the colour copy lands where compose puts the 1-bit slot: anchor on the same centre x and top y.
