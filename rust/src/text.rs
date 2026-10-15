@@ -35,6 +35,7 @@ pub struct Ch {
 #[derive(Default)]
 pub struct PageText {
     pub h: f64,
+    pub images: usize, // pictures covering 10-90 % of the page: their text (a screenshot, a poster) is not in the text layer
     pub chars: Vec<Ch>,
     pub digital: bool,
     pub unmapped: usize,
@@ -43,6 +44,9 @@ pub struct PageText {
 
 /// Device that keeps every visible, upright glyph with its Unicode text, position and size.
 struct Collect {
+    w: f64,
+    h: f64,
+    images: usize,
     chars: Vec<Ch>,
     unmapped: usize,
     rotated: usize,
@@ -94,7 +98,12 @@ impl<'a> Device<'a> for Collect {
         }
         self.chars.push(Ch { s, x0: e, x1: e + adv * a, y: f, size, bold });
     }
-    fn draw_image(&mut self, _: Image<'a, '_>, _: Affine) {}
+    fn draw_image(&mut self, image: Image<'a, '_>, t: Affine) {
+        let bb = t.transform_rect_bbox(Rect::new(0.0, 0.0, image.width() as f64, image.height() as f64));
+        let (dx, dy) = ((bb.x1.min(self.w) - bb.x0.max(0.0)).max(0.0), (bb.y1.min(self.h) - bb.y0.max(0.0)).max(0.0));
+        let share = dx * dy / (self.w * self.h);
+        self.images += (0.1..0.9).contains(&share) as usize;
+    }
     fn pop_clip_path(&mut self) {}
     fn pop_transparency_group(&mut self) {}
 }
@@ -114,11 +123,11 @@ fn lig(c: char) -> String {
 
 pub fn page_text(page: &Page) -> PageText {
     let (w, h) = page.render_dimensions();
-    let mut dev = Collect { chars: vec![], unmapped: 0, rotated: 0 };
+    let mut dev = Collect { w: w as f64, h: h as f64, images: 0, chars: vec![], unmapped: 0, rotated: 0 };
     let ic = InterpreterCache::new();
     let mut ctx = Context::new(page.initial_transform(true).to_kurbo(), Rect::new(0.0, 0.0, w as f64, h as f64), &ic, page.xref(), InterpreterSettings::default());
     interpret_page(page, &mut ctx, &mut dev);
-    PageText { h: h as f64, chars: dev.chars, digital: page_is_digital(page), unmapped: dev.unmapped, rotated: dev.rotated }
+    PageText { h: h as f64, images: dev.images, chars: dev.chars, digital: page_is_digital(page), unmapped: dev.unmapped, rotated: dev.rotated }
 }
 
 // ── Pure layout logic from here on (tested below) ──
@@ -152,7 +161,12 @@ fn median(mut v: Vec<f64>) -> f64 {
 
 /// Glyphs -> fragments: rows of a shared baseline (raised/lowered small glyphs join the row they sit on), split at wide gaps.
 fn fragments(chars: &[Ch]) -> Vec<Frag> {
-    let mut cs: Vec<&Ch> = chars.iter().filter(|c| c.size > 0.5).collect();
+    // The same glyph drawn twice in the same place (a shadow, a second text pass) counts once.
+    let mut seen = std::collections::HashSet::new();
+    let mut cs: Vec<&Ch> = chars
+        .iter()
+        .filter(|c| c.size > 0.5 && seen.insert((c.s.clone(), (c.x0 / (0.2 * c.size)).round() as i64, (c.y / (0.2 * c.size)).round() as i64)))
+        .collect();
     cs.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x0.total_cmp(&b.x0)));
     let mut rows: Vec<Vec<&Ch>> = vec![];
     for c in cs {
@@ -253,7 +267,28 @@ fn page_number(text: &str) -> Option<u32> {
 }
 
 fn norm(text: &str) -> String {
-    text.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect::<String>().to_lowercase()
+    let mut out = String::new();
+    for c in text.to_lowercase().chars() {
+        if !c.is_ascii_digit() {
+            out.push(c);
+        } else if !out.ends_with('#') {
+            out.push('#');
+        }
+    }
+    out
+}
+
+/// A number standing first or last in a header/footer line ("190 Hartmut Rosa", "… Issue 2 2022 36"): a page number
+/// candidate. Only an offset shared by several pages makes it one (see page_labels).
+fn edge_numbers(text: &str) -> Vec<u32> {
+    let w: Vec<&str> = text.split_whitespace().collect();
+    [w.first(), w.last()]
+        .into_iter()
+        .flatten()
+        .map(|t| t.trim_matches(|c: char| !c.is_ascii_digit()))
+        .filter(|t| !t.is_empty() && t.len() <= 4 && t.chars().all(|c| c.is_ascii_digit()))
+        .filter_map(|t| t.parse().ok())
+        .collect()
 }
 
 pub struct PageReport {
@@ -263,6 +298,7 @@ pub struct PageReport {
     pub unmapped: usize,
     pub rotated: usize,
     pub tables: usize,
+    pub images: usize,
 }
 
 struct Line {
@@ -295,13 +331,17 @@ pub fn to_markdown(pages: &[PageText]) -> (String, Vec<PageReport>) {
     // Running headers/footers: an edge fragment whose text (digits ignored) repeats on several pages. Page numbers: an edge
     // fragment that reads as a number.
     let edge = |p: &PageText, f: &Frag| f.bot() < EDGE_FRAC * p.h || f.top() > (1.0 - EDGE_FRAC) * p.h;
+    // Nothing else lies between this fragment and the page edge in its own width.
     let outer = |fs: &[Frag], f: &Frag, p: &PageText| {
-        // nothing else lies between this fragment and the page edge
-        // and it stands clear of the text block: no line within 1.8 letter heights on the page-centre side
+        let top = f.top() < p.h / 2.0;
+        let d0 = 0.3 * f.size;
+        !fs.iter().any(|g| g.x1 > f.x0 && g.x0 < f.x1 && if top { g.base < f.base - d0 } else { g.base > f.base + d0 })
+    };
+    // ... and it stands clear of the text block: no line within 1.8 letter heights on the page-centre side.
+    let clear = |fs: &[Frag], f: &Frag, p: &PageText| {
         let top = f.top() < p.h / 2.0;
         let (d0, d1) = (0.3 * f.size, 1.8 * f.size);
-        !fs.iter().any(|g| g.x1 > f.x0 && g.x0 < f.x1 && if top { g.base < f.base - d0 } else { g.base > f.base + d0 })
-            && !fs.iter().any(|g| if top { g.base > f.base + d0 && g.base < f.base + d1 } else { g.base < f.base - d0 && g.base > f.base - d1 })
+        !fs.iter().any(|g| if top { g.base > f.base + d0 && g.base < f.base + d1 } else { g.base < f.base - d0 && g.base > f.base - d1 })
     };
     let mut counts = std::collections::HashMap::<String, usize>::new();
     for (p, fs) in pages.iter().zip(&frags) {
@@ -312,27 +352,41 @@ pub fn to_markdown(pages: &[PageText]) -> (String, Vec<PageReport>) {
             }
         }
     }
+    // Repeating on a quarter of the pages is enough for a line standing clear of the text; on half of them for one close to it
+    // (a footer set tight under the last line).
     let repeat_min = 2.max(pages.len() / 4);
-    let mut numbers: Vec<Vec<u32>> = vec![];
+    let repeat_close = 3.max(pages.len().div_ceil(2));
+    // PDFABLE_TEXT_DEBUG=1: every fragment with its header/footer tests, as TSV on stderr.
+    let debug = std::env::var_os("PDFABLE_TEXT_DEBUG").is_some();
+    let reports_page = |p: &PageText, pages: &[PageText]| pages.iter().position(|q| std::ptr::eq(q, p)).map_or(0, |i| i + 1);
+    let mut numbers: Vec<(Vec<u32>, Vec<u32>)> = vec![];
     let mut kept: Vec<Vec<Frag>> = vec![];
     for (p, fs) in pages.iter().zip(&frags) {
-        let mut nums = vec![];
+        let (mut pure, mut cands) = (vec![], vec![]);
         let mut keep = vec![];
         for f in fs {
+            if debug {
+                let c = counts.get(&norm(&f.text)).copied().unwrap_or(0);
+                eprintln!("frag\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{}\tedge={} outer={} clear={} repeat={c}\t{}", reports_page(p, pages), f.x0, f.x1, f.base, f.size, f.bold as u8, edge(p, f) as u8, outer(fs, f, p) as u8, clear(fs, f, p) as u8, f.text);
+            }
             if edge(p, f) && outer(fs, f, p) {
+                cands.extend(edge_numbers(&f.text));
                 if let Some(n) = page_number(&f.text) {
-                    nums.push(n);
+                    pure.push(n);
                     continue;
                 }
-                if counts.get(&norm(&f.text)).is_some_and(|&c| c >= repeat_min) {
+                let c = counts.get(&norm(&f.text)).copied().unwrap_or(0);
+                if c >= repeat_close || c >= repeat_min && clear(fs, f, p) {
                     continue;
                 }
             }
             keep.push(f.clone());
         }
-        nums.sort();
-        nums.dedup();
-        numbers.push(nums);
+        pure.sort();
+        pure.dedup();
+        cands.sort();
+        cands.dedup();
+        numbers.push((pure, cands));
         kept.push(keep);
     }
     let labels = page_labels(&numbers);
@@ -373,7 +427,7 @@ pub fn to_markdown(pages: &[PageText]) -> (String, Vec<PageReport>) {
         let last = i + 1 == pages.len();
         out.truncate(out.trim_end_matches('\n').len());
         out.push_str(&page_marker(&labels[i], &notes, !last));
-        reports.push(PageReport { label: labels[i].clone(), digital: p.digital, chars: p.chars.len(), unmapped: p.unmapped, rotated: p.rotated, tables });
+        reports.push(PageReport { label: labels[i].clone(), digital: p.digital, chars: p.chars.len(), unmapped: p.unmapped, rotated: p.rotated, tables, images: p.images });
     }
     (out.trim_start().to_string(), reports)
 }
@@ -386,25 +440,27 @@ fn mode(v: &[f64]) -> Option<f64> {
     m.into_iter().max_by_key(|&(k, c)| (c, k)).map(|(k, _)| f64::from_bits(k))
 }
 
-/// One label per page: the printed number where the pages agree on an offset from the PDF page index (pages without a printed
-/// number, e.g. chapter openers, follow it); two numbers on one page (a spread) print as "a–b"; otherwise the PDF page number.
-fn page_labels(numbers: &[Vec<u32>]) -> Vec<String> {
-    let offs: Vec<i64> = numbers.iter().enumerate().filter(|(_, n)| n.len() == 1).map(|(i, n)| n[0] as i64 - i as i64).collect();
-    let k = {
-        let mut best = None;
-        for &o in &offs {
-            let c = offs.iter().filter(|&&x| x == o).count();
-            if c >= 2 && c * 2 >= offs.len() && best.is_none_or(|(_, bc)| c > bc) {
-                best = Some((o, c));
+/// One label per page. A spread (two printed numbers a, a+1) prints as "a–b". Otherwise, when header/footer numbers on several
+/// pages sit at the same offset from the PDF page index, every page gets index + offset (pages without a printed number, e.g.
+/// chapter openers, follow it; a year or an ISSN in the footer never keeps one offset). Otherwise a lone printed number, or the
+/// PDF page number.
+fn page_labels(numbers: &[(Vec<u32>, Vec<u32>)]) -> Vec<String> {
+    let mut offs = std::collections::HashMap::<i64, usize>::new();
+    for (i, (_, c)) in numbers.iter().enumerate() {
+        let mut seen = std::collections::HashSet::new();
+        for &n in c {
+            if seen.insert(n as i64 - i as i64) {
+                *offs.entry(n as i64 - i as i64).or_default() += 1;
             }
         }
-        best.map(|b| b.0)
-    };
+    }
+    let with = numbers.iter().filter(|(_, c)| !c.is_empty()).count();
+    let k = offs.into_iter().filter(|&(_, c)| c >= 2 && c * 5 >= with * 2).max_by_key(|&(o, c)| (c, -o)).map(|(o, _)| o);
     numbers
         .iter()
         .enumerate()
-        .map(|(i, n)| match (n.as_slice(), k) {
-            ([a, .., b], _) => format!("{a}–{b}"),
+        .map(|(i, (pure, _))| match (pure.as_slice(), k) {
+            ([a, b], _) if *b == a + 1 => format!("{a}–{b}"),
             (_, Some(k)) if i as i64 + k >= 1 => (i as i64 + k).to_string(),
             ([a], _) => a.to_string(),
             _ => (i + 1).to_string(),
@@ -759,10 +815,15 @@ mod tests {
 
     #[test]
     fn labels_follow_offset_and_spreads() {
-        let n = |v: &[u32]| v.to_vec();
+        let n = |v: &[u32]| (v.to_vec(), v.to_vec());
         assert_eq!(page_labels(&[n(&[]), n(&[4]), n(&[5]), n(&[])]), ["3", "4", "5", "6"]);
         assert_eq!(page_labels(&[n(&[]), n(&[])]), ["1", "2"]);
         assert_eq!(page_labels(&[n(&[2, 3])]), ["2–3"]);
+        // footer "ISSN 2369-8721 … 2022 36": the year keeps no offset, the page number does
+        let f = |p: u32| (vec![], vec![2022, p]);
+        assert_eq!(page_labels(&[f(36), f(37), f(38)]), ["36", "37", "38"]);
+        assert_eq!(edge_numbers("ISSN 2369-8721 The JUE Volume 12 Issue 2 2022 36"), [36]);
+        assert_eq!(edge_numbers("190 Hartmut Rosa"), [190]);
         assert_eq!(page_number("Side 7"), Some(7));
         assert_eq!(page_number("— 12 —"), Some(12));
         assert_eq!(page_number("3 / 24"), Some(3));
