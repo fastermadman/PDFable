@@ -277,10 +277,10 @@ fn main() {
     if text_md {
         let pages = par_pages(&data, n, |p, _| text::page_text(p));
         let (md, reports) = text::to_markdown(&pages);
-        eprintln!("page\tlabel\tkind\tglyphs\tunmapped\trotated\ttables\timages");
+        eprintln!("page\tlabel\tkind\tglyphs\tunmapped\trotated\ttables\timage_share");
         for (i, r) in reports.iter().enumerate() {
             let kind = if r.digital { "digital" } else { "scan" };
-            eprintln!("{}\t{}\t{kind}\t{}\t{}\t{}\t{}\t{}", i + 1, r.label, r.chars, r.unmapped, r.rotated, r.tables, r.images);
+            eprintln!("{}\t{}\t{kind}\t{}\t{}\t{}\t{}\t{:.2}", i + 1, r.label, r.chars, r.unmapped, r.rotated, r.tables, r.images);
         }
         return print!("{md}");
     }

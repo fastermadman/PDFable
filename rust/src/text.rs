@@ -16,6 +16,7 @@ use hayro::hayro_interpret::{
 use kurbo::{Affine, BezPath, Rect, Shape};
 
 const FRAG_GAP: f64 = 1.5; // a sideways gap wider than this (letter sizes) ends a fragment: column gutters, table cells
+const COL_GAP: f64 = 0.6; // a gap this wide (letter sizes) that lines up over many rows is a column gutter
 const WORD_GAP: f64 = 0.18; // a gap wider than this (letter sizes) between glyphs without a space glyph is a word space
 const EDGE_FRAC: f64 = 0.12; // running headers/footers and page numbers sit in this share of the page height at the top/bottom
 const HEADING_SIZE: f64 = 1.15; // a line this much larger than the body size is a heading
@@ -35,7 +36,7 @@ pub struct Ch {
 #[derive(Default)]
 pub struct PageText {
     pub h: f64,
-    pub images: usize, // pictures covering 10-90 % of the page: their text (a screenshot, a poster) is not in the text layer
+    pub images: f64, // share of the page under pictures (summed, at most 1): text inside them (a screenshot, a poster) is not in the text layer
     pub chars: Vec<Ch>,
     pub digital: bool,
     pub unmapped: usize,
@@ -46,7 +47,7 @@ pub struct PageText {
 struct Collect {
     w: f64,
     h: f64,
-    images: usize,
+    images: f64,
     chars: Vec<Ch>,
     unmapped: usize,
     rotated: usize,
@@ -101,8 +102,7 @@ impl<'a> Device<'a> for Collect {
     fn draw_image(&mut self, image: Image<'a, '_>, t: Affine) {
         let bb = t.transform_rect_bbox(Rect::new(0.0, 0.0, image.width() as f64, image.height() as f64));
         let (dx, dy) = ((bb.x1.min(self.w) - bb.x0.max(0.0)).max(0.0), (bb.y1.min(self.h) - bb.y0.max(0.0)).max(0.0));
-        let share = dx * dy / (self.w * self.h);
-        self.images += (0.1..0.9).contains(&share) as usize;
+        self.images = (self.images + dx * dy / (self.w * self.h)).min(1.0);
     }
     fn pop_clip_path(&mut self) {}
     fn pop_transparency_group(&mut self) {}
@@ -123,7 +123,7 @@ fn lig(c: char) -> String {
 
 pub fn page_text(page: &Page) -> PageText {
     let (w, h) = page.render_dimensions();
-    let mut dev = Collect { w: w as f64, h: h as f64, images: 0, chars: vec![], unmapped: 0, rotated: 0 };
+    let mut dev = Collect { w: w as f64, h: h as f64, images: 0.0, chars: vec![], unmapped: 0, rotated: 0 };
     let ic = InterpreterCache::new();
     let mut ctx = Context::new(page.initial_transform(true).to_kurbo(), Rect::new(0.0, 0.0, w as f64, h as f64), &ic, page.xref(), InterpreterSettings::default());
     interpret_page(page, &mut ctx, &mut dev);
@@ -197,6 +197,30 @@ fn fragments(chars: &[Ch]) -> Vec<Frag> {
             merged[i] = true;
         }
     }
+    // Column gutters at glyph level: x positions (1 pt bins) that lie in a gap of at least COL_GAP letter sizes in many rows
+    // that have text on both sides. A gutter of about one letter size is narrower than FRAG_GAP, and some PDFs store both
+    // columns' lines as one string (a space glyph bridging the gutter), so fragment gaps alone miss it.
+    let width = rows.iter().flatten().map(|c| c.x1).fold(0.0, f64::max).max(0.0) as usize + 2;
+    let (mut gap_n, mut span_n) = (vec![0u32; width], vec![0u32; width]);
+    for r in &rows {
+        let mut v: Vec<&Ch> = r.iter().copied().filter(|c| !c.s.trim().is_empty()).collect();
+        v.sort_by(|a, b| a.x0.total_cmp(&b.x0));
+        let (Some(first), Some(last)) = (v.first(), v.last()) else { continue };
+        for b in first.x0.max(0.0) as usize..(last.x1.max(0.0) as usize).min(width) {
+            span_n[b] += 1;
+        }
+        let mut right = f64::MIN;
+        for w in v.windows(2) {
+            right = right.max(w[0].x1);
+            if w[1].x0 - right >= COL_GAP * w[1].size {
+                for b in (right.max(0.0) as usize + 1)..(w[1].x0.max(0.0) as usize).min(width) {
+                    gap_n[b] += 1;
+                }
+            }
+        }
+    }
+    let gutter: Vec<bool> = (0..width).map(|b| gap_n[b] >= 5 && gap_n[b] as f64 >= 0.6 * span_n[b] as f64).collect();
+    let in_gutter = |a: f64, b: f64| (a.max(0.0) as usize..(b.max(0.0) as usize).min(width)).any(|x| gutter[x]);
     let mut out = vec![];
     for mut r in rows.into_iter().filter(|r| !r.is_empty()) {
         r.sort_by(|a, b| a.x0.total_cmp(&b.x0));
@@ -226,8 +250,8 @@ fn fragments(chars: &[Ch]) -> Vec<Frag> {
                 let size = median(cur.iter().filter(|c| !c.s.trim().is_empty()).map(|c| c.size).collect());
                 let body: Vec<&&Ch> = cur.iter().filter(|c| c.size >= 0.8 * size && !c.s.trim().is_empty()).collect();
                 out.push(Frag {
-                    x0: cur.iter().map(|c| c.x0).fold(f64::MAX, f64::min),
-                    x1: cur.iter().map(|c| c.x1).fold(f64::MIN, f64::max),
+                    x0: cur.iter().filter(|c| !c.s.trim().is_empty()).map(|c| c.x0).fold(f64::MAX, f64::min),
+                    x1: cur.iter().filter(|c| !c.s.trim().is_empty()).map(|c| c.x1).fold(f64::MIN, f64::max),
                     base: row_base,
                     size,
                     bold: !body.is_empty() && body.iter().all(|c| c.bold),
@@ -237,8 +261,9 @@ fn fragments(chars: &[Ch]) -> Vec<Frag> {
             cur.clear();
         };
         for c in r {
-            if let Some(p) = cur.iter().map(|c| c.x1).reduce(f64::max)
-                && c.x0 - p > FRAG_GAP * c.size
+            if let Some(p) = cur.iter().filter(|c| !c.s.trim().is_empty()).map(|c| c.x1).reduce(f64::max)
+                && !c.s.trim().is_empty()
+                && (c.x0 - p > FRAG_GAP * c.size || c.x0 - p >= COL_GAP * c.size && in_gutter(p, c.x0))
             {
                 flush(&mut cur);
             }
@@ -298,7 +323,7 @@ pub struct PageReport {
     pub unmapped: usize,
     pub rotated: usize,
     pub tables: usize,
-    pub images: usize,
+    pub images: f64,
 }
 
 struct Line {
@@ -359,10 +384,24 @@ pub fn to_markdown(pages: &[PageText]) -> (String, Vec<PageReport>) {
     // PDFABLE_TEXT_DEBUG=1: every fragment with its header/footer tests, as TSV on stderr.
     let debug = std::env::var_os("PDFABLE_TEXT_DEBUG").is_some();
     let reports_page = |p: &PageText, pages: &[PageText]| pages.iter().position(|q| std::ptr::eq(q, p)).map_or(0, |i| i + 1);
-    let mut numbers: Vec<(Vec<u32>, Vec<u32>)> = vec![];
+    let numbers: Vec<(Vec<u32>, Vec<u32>)> = pages
+        .iter()
+        .zip(&frags)
+        .map(|(p, fs)| {
+            let hf = || fs.iter().filter(|f| edge(p, f) && outer(fs, f, p));
+            let mut pure: Vec<u32> = hf().filter_map(|f| page_number(&f.text)).collect();
+            let mut cands: Vec<u32> = hf().flat_map(|f| edge_numbers(&f.text)).collect();
+            pure.sort();
+            pure.dedup();
+            cands.sort();
+            cands.dedup();
+            (pure, cands)
+        })
+        .collect();
+    let labels = page_labels(&numbers);
     let mut kept: Vec<Vec<Frag>> = vec![];
-    for (p, fs) in pages.iter().zip(&frags) {
-        let (mut pure, mut cands) = (vec![], vec![]);
+    for ((p, fs), label) in pages.iter().zip(&frags).zip(&labels) {
+        let label_nums: Vec<u32> = label.split('–').filter_map(|n| n.parse().ok()).collect();
         let mut keep = vec![];
         for f in fs {
             if debug {
@@ -370,26 +409,22 @@ pub fn to_markdown(pages: &[PageText]) -> (String, Vec<PageReport>) {
                 eprintln!("frag\t{}\t{:.1}\t{:.1}\t{:.1}\t{:.1}\t{}\tedge={} outer={} clear={} repeat={c}\t{}", reports_page(p, pages), f.x0, f.x1, f.base, f.size, f.bold as u8, edge(p, f) as u8, outer(fs, f, p) as u8, clear(fs, f, p) as u8, f.text);
             }
             if edge(p, f) && outer(fs, f, p) {
-                cands.extend(edge_numbers(&f.text));
-                if let Some(n) = page_number(&f.text) {
-                    pure.push(n);
+                if page_number(&f.text).is_some() {
                     continue;
                 }
                 let c = counts.get(&norm(&f.text)).copied().unwrap_or(0);
-                if c >= repeat_close || c >= repeat_min && clear(fs, f, p) {
+                // not a piece of a body line split at a wide justified gap: no other fragment on its row within 3 letter sizes
+                let alone = !fs.iter().any(|g| !std::ptr::eq(g, f) && (g.base - f.base).abs() < 0.3 * f.size && g.x0 < f.x1 + 3.0 * f.size && g.x1 > f.x0 - 3.0 * f.size);
+                // a header/footer that carries this page's printed number ("ISSN … 2022 36" on a first page, unlike the others)
+                let carries_label = edge_numbers(&f.text).iter().any(|n| label_nums.contains(n)) && numbers.iter().any(|(_, c)| !c.is_empty());
+                if c >= repeat_close && alone || c >= repeat_min && clear(fs, f, p) || carries_label && alone {
                     continue;
                 }
             }
             keep.push(f.clone());
         }
-        pure.sort();
-        pure.dedup();
-        cands.sort();
-        cands.dedup();
-        numbers.push((pure, cands));
         kept.push(keep);
     }
-    let labels = page_labels(&numbers);
 
     let mut heading_sizes: Vec<f64> = kept.iter().flatten().filter(|f| f.size >= HEADING_SIZE * body).map(|f| (f.size * 2.0).round() / 2.0).collect();
     heading_sizes.sort_by(|a, b| b.total_cmp(a));
@@ -471,7 +506,7 @@ fn page_labels(numbers: &[(Vec<u32>, Vec<u32>)]) -> Vec<String> {
 /// Strips (runs of fragments that overlap vertically) grouped into sections that keep the same column gutters; a section is
 /// read column by column, each column top to bottom.
 fn reading_order(mut fs: Vec<Frag>, body: f64) -> Vec<Block> {
-    let gmin = body;
+    let gmin = COL_GAP * body;
     fs.sort_by(|a, b| a.top().total_cmp(&b.top()));
     let mut strips: Vec<Vec<Frag>> = vec![];
     let mut bot = f64::MIN;
@@ -793,6 +828,22 @@ mod tests {
         let r = md.find("right0").unwrap();
         assert!(l < r, "{md}");
         assert!(md.starts_with("# Title"), "{md}");
+    }
+
+    #[test]
+    fn narrow_gutter_bridged_by_a_space_glyph() {
+        // both columns' lines stored as one string: a space glyph spans the 1.1-letter gutter
+        let mut c = vec![];
+        for i in 0..8 {
+            let y = 200.0 + 12.0 * i as f64;
+            let l = line(&format!("leftword{i} aaaaaaaaaaaaaa"), 50.0 + 5.0 * (i % 2) as f64, y, 10.0);
+            let end = l.last().unwrap().x1;
+            c.extend(l);
+            c.push(Ch { s: " ".into(), x0: end, x1: 181.0, y, size: 10.0, bold: false });
+            c.extend(line(&format!("rightword{i} bb"), 181.0, y, 10.0));
+        }
+        let (md, _) = to_markdown(&[page(c)]);
+        assert!(md.find("leftword7").unwrap() < md.find("rightword0").unwrap(), "{md}");
     }
 
     #[test]
