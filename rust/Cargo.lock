@@ -412,6 +412,7 @@ dependencies = [
  "jpeg-encoder",
  "kurbo",
  "pdf-writer",
+ "png",
 ]
 
 [[package]]
