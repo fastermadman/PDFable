@@ -206,6 +206,7 @@ fn main() {
     let mut count = false;
     let mut classify = false;
     let mut text_md = false;
+    let mut figures_dir: Option<String> = None; // #136: --text --figures DIR
     let mut pos = vec![];
     let mut eval = false;
     let mut detect = false;
@@ -242,6 +243,7 @@ fn main() {
             "--page-count" => count = true,
             "--classify" => classify = true,
             "--text" => text_md = true,
+            "--figures" => figures_dir = Some(it.next().cloned().unwrap_or_else(|| die("--figures DIR"))),
             s if s.starts_with("--") => die(&format!("{s}: unknown option")),
             _ => pos.push(a.clone()),
         }
@@ -275,12 +277,25 @@ fn main() {
         return println!("{}", par_pages(&data, n, |p, _| if page_is_digital(p) { 'D' } else { 'S' }).into_iter().collect::<String>());
     }
     if text_md {
-        let pages = par_pages(&data, n, |p, _| text::page_text(p));
-        let (md, reports) = text::to_markdown(&pages);
-        eprintln!("page\tlabel\tkind\tglyphs\tunmapped\trotated\ttables\timage_share");
+        let want = figures_dir.is_some();
+        let pages = par_pages(&data, n, |p, _| text::page_text(p, want));
+        let stem = std::path::Path::new(input).file_stem().map_or("page".to_string(), |s| s.to_string_lossy().into_owned());
+        let (md, reports) = text::to_markdown_named(&pages, &stem);
+        if let Some(dir) = &figures_dir {
+            std::fs::create_dir_all(dir).unwrap_or_else(|e| die(&format!("{dir}: {e}")));
+            for (i, p) in pages.iter().enumerate() {
+                for (k, f) in p.figs.iter().enumerate() {
+                    let path = std::path::Path::new(dir).join(text::fig_name(&stem, i + 1, k + 1, f.ext));
+                    std::fs::write(&path, &f.data).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
+                }
+            }
+        }
+        // The figures column only appears with --figures, so callers that read the 8-column report keep working.
+        eprintln!("page\tlabel\tkind\tglyphs\tunmapped\trotated\ttables\timage_share{}", if want { "\tfigures" } else { "" });
         for (i, r) in reports.iter().enumerate() {
             let kind = if r.digital { "digital" } else { "scan" };
-            eprintln!("{}\t{}\t{kind}\t{}\t{}\t{}\t{}\t{:.2}", i + 1, r.label, r.chars, r.unmapped, r.rotated, r.tables, r.images);
+            let extra = if want { format!("\t{}", r.figures) } else { String::new() };
+            eprintln!("{}\t{}\t{kind}\t{}\t{}\t{}\t{}\t{:.2}{extra}", i + 1, r.label, r.chars, r.unmapped, r.rotated, r.tables, r.images);
         }
         return print!("{md}");
     }

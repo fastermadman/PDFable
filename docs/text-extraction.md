@@ -78,3 +78,14 @@ was shown wrong, except buber8C (50/57) and rosesuhr (17/21), which were not che
 A rule for ItsWiz to try (new issue, not this PR): `--text` when `--classify` is all D, no page has image_share ≥ 0.15 and
 unmapped glyphs are under 1 %; otherwise MinerU as today. madariaga shows the picture flag is not yet complete, so keep
 MinerU as the default until the flag also catches screenshot pages.
+
+## Pictures: `--figures DIR` (#136)
+
+`pdfable --text --figures DIR in.pdf > note.md` also cuts every picture out of the *rendered* page in its box, so text or arrows
+drawn on top of the picture come along. Each is saved as `<stem>_p<page>_<n>.jpg|png` in DIR (the smaller of the two: PNG wins on
+flat graphics and screenshots, JPEG on photos; 150 dpi) and `![[file]]` is put in the note before the first line that starts
+below the picture's top and lies over its width. The stderr report gets a `figures` column (only with this flag).
+
+Skipped: pictures under 3 % of the page (logos, icons) and pictures over 90 % of it (backgrounds). Not caught: diagrams drawn with
+strokes are not pictures in the PDF, so they need clusters of strokes found (own issue). In a multi-column page a picture inside
+one column can land a line off.

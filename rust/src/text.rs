@@ -5,7 +5,7 @@
 // numbers out -> footnotes (small text below the body) -> reading order (strips grouped into sections that keep the same column
 // gutters, read column by column) -> lines -> paragraphs and headings. A section of short cells in 3+ columns is written as a pipe
 // table. stderr gets one report row per page, so a caller can see which pages to leave to MinerU (scan, unmapped glyphs, tables).
-use crate::page_is_digital;
+use crate::{Rgb, encode_jpeg, page_is_digital, page_rgb};
 use hayro::hayro_interpret::font::Glyph;
 use hayro::hayro_interpret::hayro_cmap::BfString;
 use hayro::hayro_interpret::hayro_syntax::page::Page;
@@ -22,6 +22,20 @@ const EDGE_FRAC: f64 = 0.12; // running headers/footers and page numbers sit in 
 const HEADING_SIZE: f64 = 1.15; // a line this much larger than the body size is a heading
 const SMALL_SIZE: f64 = 0.85; // footnote text is at most this share of the body size
 const MAX_HEADING_WORDS: usize = 25;
+const FIG_MIN_SHARE: f64 = 0.03; // #136: a picture under this share of the page (logo, icon) is skipped
+const FIG_MAX_SHARE: f64 = 0.9; // ... and so is one that is the page's background
+const FIG_DPI: f32 = 150.0; // pictures are cut from the rendered page at this dpi
+
+/// A picture cut out of the rendered page (#136): box in points (y down), file extension, file bytes.
+pub struct Fig {
+    pub b: [f64; 4],
+    pub ext: &'static str,
+    pub data: Vec<u8>,
+}
+
+pub fn fig_name(stem: &str, page: usize, n: usize, ext: &str) -> String {
+    format!("{stem}_p{page}_{n}.{ext}")
+}
 
 #[derive(Clone, Debug)]
 pub struct Ch {
@@ -41,6 +55,7 @@ pub struct PageText {
     pub digital: bool,
     pub unmapped: usize,
     pub rotated: usize,
+    pub figs: Vec<Fig>, // only with figures=true; sorted top to bottom
 }
 
 /// Device that keeps every visible, upright glyph with its Unicode text, position and size.
@@ -48,6 +63,7 @@ struct Collect {
     w: f64,
     h: f64,
     images: f64,
+    boxes: Vec<[f64; 4]>,
     chars: Vec<Ch>,
     unmapped: usize,
     rotated: usize,
@@ -102,7 +118,13 @@ impl<'a> Device<'a> for Collect {
     fn draw_image(&mut self, image: Image<'a, '_>, t: Affine) {
         let bb = t.transform_rect_bbox(Rect::new(0.0, 0.0, image.width() as f64, image.height() as f64));
         let (dx, dy) = ((bb.x1.min(self.w) - bb.x0.max(0.0)).max(0.0), (bb.y1.min(self.h) - bb.y0.max(0.0)).max(0.0));
-        self.images = (self.images + dx * dy / (self.w * self.h)).min(1.0);
+        let share = dx * dy / (self.w * self.h);
+        self.images = (self.images + share).min(1.0);
+        let b = [bb.x0.max(0.0), bb.y0.max(0.0), bb.x1.min(self.w), bb.y1.min(self.h)];
+        // the same picture drawn twice (a mask, a second pass) counts once
+        if (FIG_MIN_SHARE..=FIG_MAX_SHARE).contains(&share) && !self.boxes.iter().any(|o| o.iter().zip(&b).all(|(p, q)| (p - q).abs() < 1.0)) {
+            self.boxes.push(b);
+        }
     }
     fn pop_clip_path(&mut self) {}
     fn pop_transparency_group(&mut self) {}
@@ -121,13 +143,56 @@ fn lig(c: char) -> String {
     }
 }
 
-pub fn page_text(page: &Page) -> PageText {
+/// The boxes cut out of the page as files; the smaller of JPEG and PNG for each (PNG wins on flat graphics, JPEG on photos).
+fn cut_figures(page: &Page, boxes: &[[f64; 4]]) -> Vec<Fig> {
+    if boxes.is_empty() {
+        return vec![];
+    }
+    let g = page_rgb(page, FIG_DPI);
+    let s = FIG_DPI as f64 / 72.0;
+    let mut v = boxes.to_vec();
+    v.sort_by(|a, b| a[1].total_cmp(&b[1]).then(a[0].total_cmp(&b[0])));
+    v.into_iter()
+        .filter_map(|b| {
+            let (x0, y0) = (((b[0] * s).floor() as u32).min(g.w), ((b[1] * s).floor() as u32).min(g.h));
+            let (x1, y1) = (((b[2] * s).ceil() as u32).min(g.w), ((b[3] * s).ceil() as u32).min(g.h));
+            if x1 < x0 + 2 || y1 < y0 + 2 {
+                return None;
+            }
+            let (w, h) = (x1 - x0, y1 - y0);
+            let mut px = Vec::with_capacity((w * h * 3) as usize);
+            for y in y0..y1 {
+                let o = ((y * g.w + x0) * 3) as usize;
+                px.extend_from_slice(&g.px[o..o + (w * 3) as usize]);
+            }
+            let c = Rgb { w, h, px };
+            let (jpg, png) = (encode_jpeg(&c, 85), encode_png(&c));
+            Some(if png.len() < jpg.len() { Fig { b, ext: "png", data: png } } else { Fig { b, ext: "jpg", data: jpg } })
+        })
+        .collect()
+}
+
+fn encode_png(g: &Rgb) -> Vec<u8> {
+    let mut out = Vec::new();
+    {
+        let mut e = png::Encoder::new(&mut out, g.w, g.h);
+        e.set_color(png::ColorType::Rgb);
+        e.set_depth(png::BitDepth::Eight);
+        e.set_compression(png::Compression::High);
+        let mut w = e.write_header().unwrap();
+        w.write_image_data(&g.px).unwrap();
+    }
+    out
+}
+
+pub fn page_text(page: &Page, figures: bool) -> PageText {
     let (w, h) = page.render_dimensions();
-    let mut dev = Collect { w: w as f64, h: h as f64, images: 0.0, chars: vec![], unmapped: 0, rotated: 0 };
+    let mut dev = Collect { w: w as f64, h: h as f64, images: 0.0, boxes: vec![], chars: vec![], unmapped: 0, rotated: 0 };
     let ic = InterpreterCache::new();
     let mut ctx = Context::new(page.initial_transform(true).to_kurbo(), Rect::new(0.0, 0.0, w as f64, h as f64), &ic, page.xref(), InterpreterSettings::default());
     interpret_page(page, &mut ctx, &mut dev);
-    PageText { h: h as f64, images: dev.images, chars: dev.chars, digital: page_is_digital(page), unmapped: dev.unmapped, rotated: dev.rotated }
+    let figs = if figures { cut_figures(page, &dev.boxes) } else { vec![] };
+    PageText { h: h as f64, images: dev.images, chars: dev.chars, digital: page_is_digital(page), unmapped: dev.unmapped, rotated: dev.rotated, figs }
 }
 
 // ── Pure layout logic from here on (tested below) ──
@@ -324,6 +389,7 @@ pub struct PageReport {
     pub rotated: usize,
     pub tables: usize,
     pub images: f64,
+    pub figures: usize,
 }
 
 struct Line {
@@ -339,9 +405,40 @@ struct Line {
 enum Block {
     Lines(Vec<Line>),
     Table(Vec<Vec<String>>),
+    Fig(usize), // index into the page's figs
 }
 
+/// Each picture goes before the first line that starts below its top and lies over its width; a block of lines is split there.
+/// ponytail: in a multi-column page a picture in the middle of one column can land a line off; the order of columns is kept.
+fn place_figures(mut blocks: Vec<Block>, figs: &[Fig]) -> Vec<Block> {
+    for (n, f) in figs.iter().enumerate() {
+        let [fx0, fy0, fx1, _] = f.b;
+        let at = blocks.iter().enumerate().find_map(|(i, b)| match b {
+            Block::Lines(ls) => ls.iter().position(|l| l.base > fy0 && l.x1 > fx0 && l.x0 < fx1).map(|k| (i, k)),
+            _ => None,
+        });
+        match at {
+            Some((i, 0)) => blocks.insert(i, Block::Fig(n)),
+            Some((i, k)) => {
+                let Block::Lines(ls) = &mut blocks[i] else { unreachable!() };
+                let mut tail = ls.split_off(k);
+                tail[0].col_start = true;
+                blocks.insert(i + 1, Block::Fig(n));
+                blocks.insert(i + 2, Block::Lines(tail));
+            }
+            None => blocks.push(Block::Fig(n)),
+        }
+    }
+    blocks
+}
+
+#[cfg(test)]
 pub fn to_markdown(pages: &[PageText]) -> (String, Vec<PageReport>) {
+    to_markdown_named(pages, "page")
+}
+
+/// `stem` names the picture files in `![[...]]` (see fig_name).
+pub fn to_markdown_named(pages: &[PageText], stem: &str) -> (String, Vec<PageReport>) {
     let frags: Vec<Vec<Frag>> = pages.iter().map(|p| if p.digital { fragments(&p.chars) } else { vec![] }).collect();
     let body = {
         let mut v = vec![];
@@ -441,13 +538,14 @@ pub fn to_markdown(pages: &[PageText]) -> (String, Vec<PageReport>) {
                 && !fs.iter().any(|g| g.size > SMALL_SIZE * body && g.x1 > f.x0 && g.x0 < f.x1 && g.base > f.base)
         };
         let (notes, rest): (Vec<Frag>, Vec<Frag>) = fs.iter().cloned().partition(|f| is_note(f, &fs));
-        let blocks = reading_order(rest, body);
+        let blocks = place_figures(reading_order(rest, body), &p.figs);
         let tables = blocks.iter().filter(|b| matches!(b, Block::Table(_))).count();
         let mut paras: Vec<String> = vec![];
         for b in blocks {
             match b {
                 Block::Lines(ls) => paragraphs(&ls, body, &level, &mut paras),
                 Block::Table(rows) => paras.push(table_md(&rows)),
+                Block::Fig(k) => paras.push(format!("![[{}]]", fig_name(stem, i + 1, k + 1, p.figs[k].ext))),
             }
         }
         let mut notes = notes;
@@ -462,7 +560,7 @@ pub fn to_markdown(pages: &[PageText]) -> (String, Vec<PageReport>) {
         let last = i + 1 == pages.len();
         out.truncate(out.trim_end_matches('\n').len());
         out.push_str(&page_marker(&labels[i], &notes, !last));
-        reports.push(PageReport { label: labels[i].clone(), digital: p.digital, chars: p.chars.len(), unmapped: p.unmapped, rotated: p.rotated, tables, images: p.images });
+        reports.push(PageReport { label: labels[i].clone(), digital: p.digital, chars: p.chars.len(), unmapped: p.unmapped, rotated: p.rotated, tables, images: p.images, figures: p.figs.len() });
     }
     (out.trim_start().to_string(), reports)
 }
@@ -902,5 +1000,27 @@ mod tests {
         let (md, rep) = to_markdown(&[page(c)]);
         assert!(md.contains("| Name | Age | Town |\n| --- | --- | --- |\n| Ann | 31 | Aarhus |"), "{md}");
         assert_eq!(rep[0].tables, 1);
+    }
+
+    #[test]
+    fn figure_goes_between_the_lines_around_it() {
+        let mut c = vec![];
+        for i in 0..6 {
+            c.extend(line(&format!("line{i} text that is long enough here"), 50.0, 200.0 + 12.0 * i as f64, 10.0));
+        }
+        let mut pg = page(c);
+        pg.figs = vec![Fig { b: [50.0, 225.0, 200.0, 300.0], ext: "png", data: vec![] }];
+        let (md, rep) = to_markdown_named(&[pg], "doc");
+        let (a, f, b) = (md.find("line2").unwrap(), md.find("![[doc_p1_1.png]]").unwrap(), md.find("line3").unwrap());
+        assert!(a < f && f < b, "{md}");
+        assert_eq!(rep[0].figures, 1);
+    }
+
+    #[test]
+    fn figure_without_text_below_goes_last() {
+        let mut pg = page(line("only text", 50.0, 100.0, 10.0));
+        pg.figs = vec![Fig { b: [50.0, 400.0, 200.0, 500.0], ext: "jpg", data: vec![] }];
+        let (md, _) = to_markdown_named(&[pg], "x");
+        assert!(md.find("only text").unwrap() < md.find("![[x_p1_1.jpg]]").unwrap(), "{md}");
     }
 }
