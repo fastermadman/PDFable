@@ -3,6 +3,8 @@
 //   pdfable [--rotate] [--crop] [--split auto|off|N%] [--deskew] [--colour-pages LIST|all|none] input.pdf [output.pdf] [threshold%=60] [dpi=300]
 // MODE=images (as pdfable.sh) = --colour-pages all: every page colour JPEG, default output <input>.shrunk.pdf.
 // PROGRESS_FILE=<path>: one line per finished page is appended (droplet). --page-count input.pdf prints the page count.
+// --text input.pdf (#134, experiment) prints Markdown from the PDF's own text layer, with ItsWiz's page markers; a report per page
+// goes to stderr (src/text.rs).
 // --classify input.pdf prints one letter per page, D (digital: visible text) or S (scan), for the caller to decide (#281).
 // PDFABLE_TIMING=1 prints per-page geometry and stage times (ms) to stderr; PDFABLE_RENDER=1 always renders.
 // A/B knobs for the pipeline-order questions of #29 (docs/rust-port.md section 2):
@@ -21,6 +23,7 @@
 //   PDFABLE_OSD=tesseract   orientation by Tesseract OSD (as bash) instead of the own detector (#30); --osd-eval prints its accuracy
 //                           (EVAL_UPRIGHT=1: the input pages are upright, no Tesseract truth; #45)
 // --detect-eval a.pdf [b.pdf ...] prints candidate picture/colour signals per page and tile as TSV (#43, docs/rust-port.md section 4).
+mod text;
 use hayro::hayro_interpret::font::Glyph;
 use hayro::hayro_interpret::hayro_syntax::Pdf;
 use hayro::hayro_interpret::hayro_syntax::page::Page;
@@ -202,6 +205,7 @@ fn main() {
     }
     let mut count = false;
     let mut classify = false;
+    let mut text_md = false;
     let mut pos = vec![];
     let mut eval = false;
     let mut detect = false;
@@ -237,6 +241,7 @@ fn main() {
             },
             "--page-count" => count = true,
             "--classify" => classify = true,
+            "--text" => text_md = true,
             s if s.starts_with("--") => die(&format!("{s}: unknown option")),
             _ => pos.push(a.clone()),
         }
@@ -268,6 +273,16 @@ fn main() {
     }
     if classify {
         return println!("{}", par_pages(&data, n, |p, _| if page_is_digital(p) { 'D' } else { 'S' }).into_iter().collect::<String>());
+    }
+    if text_md {
+        let pages = par_pages(&data, n, |p, _| text::page_text(p));
+        let (md, reports) = text::to_markdown(&pages);
+        eprintln!("page\tlabel\tkind\tglyphs\tunmapped\trotated\ttables");
+        for (i, r) in reports.iter().enumerate() {
+            let kind = if r.digital { "digital" } else { "scan" };
+            eprintln!("{}\t{}\t{kind}\t{}\t{}\t{}\t{}", i + 1, r.label, r.chars, r.unmapped, r.rotated, r.tables);
+        }
+        return print!("{md}");
     }
     if eval {
         return osd_eval(&data, n);
