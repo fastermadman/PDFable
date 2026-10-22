@@ -17,3 +17,7 @@ will be visible in the output PDFs at all.
 **The summary is added, never a substitute.** Everything else stays as strict as before: verbatim numbers (not paraphrased),
 every metric in the issue checked and reported, "if a number differs, stop and report", known limits and anything that got worse
 listed explicitly. The block must not hide a failed check or a "needs a look"; if one exists it goes in "Kort fortalt" too.
+
+## Lukke issues via PR
+
+PR-beskrivelsen skal have `Closes #N` (engelsk nøgleord; "Lukker" virker ikke), ét nøgleord pr. issue, og PR skal merges til main. Delvis løsning: `Refs #N`. Se `.github/pull_request_template.md`.
