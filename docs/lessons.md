@@ -240,6 +240,11 @@ found the cause at once. The #45 idea ("darker than text is not text") did not a
   content bounds and splitting at the detected gutter (#2). Multi-column pages are never split by default.
   `--ocr` (hidden text layer) is out on purpose: it does not help the markdown-extraction pipeline, only
   reading the PDF itself.
+- **One median box for all single pages cut text off (#148).** Pass A's box is only a pre-crop: text it cuts is gone for good
+  (deskew and `keep_box` come after). Pages scanned alternately left/right on the glass (Behrendt) lost a quarter of each line
+  (3911 of 4640 words). `plan()` now crops each single page to its own box, unless that is narrower than 70 % of the median
+  box (a near-empty page, Kirk p2/12/14): then the median. Behrendt 4582 words; no file has more pages with lost text.
+  Cost: bigger pages and files (Behrendt +19 %, Ubbesen +11.8 %). ScanTailor, unpaper and Leptonica also pick a box per page.
 
 ## Ideas to test (from #8, unverified: from web search/descriptions, not source-read)
 

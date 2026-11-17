@@ -566,6 +566,13 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
     (n > 0).then(|| if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 })
 }
 
+/// #148: a single page crops to its own box, but one much narrower than the median box (a near-empty page, one short column)
+/// is no page box: it takes the median instead. ponytail: width only; 70 % set from Kirk p2/12/14 (4 %, 41 %), not tuned.
+const OWN_BOX_MIN_FRAC: f64 = 0.7;
+fn single_box(own: [i64; 4], med: [i64; 4]) -> [i64; 4] {
+    if ((own[2] - own[0]) as f64) < OWN_BOX_MIN_FRAC * (med[2] - med[0]) as f64 { med } else { own }
+}
+
 /// Port of the bash between-passes step: median single-page box, median gutter position, per-page plan.
 /// Returns the plans and the pages that look double but got no trusted gutter.
 fn plan(metas: &[Meta], cfg: &Cfg) -> (Vec<Plan>, Vec<usize>) {
@@ -608,7 +615,7 @@ fn plan(metas: &[Meta], cfg: &Cfg) -> (Vec<Plan>, Vec<usize>) {
                 review.push(i);
             }
             match (cfg.crop, single) {
-                (true, Some(s)) => Plan::Box(s),
+                (true, Some(s)) => Plan::Box(single_box(t, s)),
                 (true, None) => Plan::Box(t),
                 _ => Plan::Whole,
             }
@@ -3197,6 +3204,13 @@ mod tests {
         let bar = page(&|x, y| y >= 42 && y < 62 && x >= 150 && x < 850);
         assert!(line < 42, "{line}");
         assert!(bar > 200, "{bar}");
+    }
+
+    #[test]
+    fn single_box_own_unless_narrow() {
+        let med = [100, 0, 1100, 1500];
+        assert_eq!(single_box([300, 10, 1100, 1400], med), [300, 10, 1100, 1400]); // 800 px >= 70 % of 1000: own
+        assert_eq!(single_box([300, 10, 900, 1400], med), med); // 600 px < 70 %: median
     }
 
     // keep_box (#55, #60) on a synthetic page: 10x14 letters in 13 lines make the text block. Returns the bits and its box.
