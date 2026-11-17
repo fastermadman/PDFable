@@ -21,3 +21,7 @@ listed explicitly. The block must not hide a failed check or a "needs a look"; i
 ## Lukke issues via PR
 
 PR-beskrivelsen skal have `Closes #N` (engelsk nøgleord; "Lukker" virker ikke), ét nøgleord pr. issue, og PR skal merges til main. Delvis løsning: `Refs #N`. Se `.github/pull_request_template.md`.
+
+## Visuel kontrol af sider (checker-agenten)
+
+Ja/nej-kontrol af, om en side er afskåret, drejet eller forringet, på side-om-side-ark (original til venstre, resultat til højre): kør `checker` med `model: haiku`. Flager Haiku noget, eller er arket uklart, kør samme ark igen med Sonnet. Haiku 5.5 svarede rigtigt på 8 af 8 ark (17. nov. 2026, grov test, #152). Farve- og pixelmålinger er ikke testet på Haiku: dem kører `checker` på sin normale model. OCR-ordtal alene kan give falske alarmer (Behrendt side 6) og misforstå en vendt side som tabt tekst (side 25); se arket, før et tab antages.
