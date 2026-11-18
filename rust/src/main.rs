@@ -47,6 +47,7 @@ const OSD_KA: usize = 8;
 const OSD_KD: usize = 4;
 const OSD_TILE: usize = 48;
 const OSD_OWN_MIN_CONFIDENCE: f32 = 0.25;
+const OSD_FLIP_MIN_CONFIDENCE: f32 = 0.5; // #158: a 180° disagreement with the document needs at least this
 // Darkness (0..1, flattened) above which a profile value is not text: text lines peak at ~0.2-0.3 (#45).
 const OSD_DARK_MAX: f64 = 0.4;
 const DOUBLE_AR_MIN: f64 = 1.15;
@@ -149,7 +150,7 @@ struct Cfg {
 #[derive(Default, Clone)]
 struct Meta {
     rot: u32,
-    conf: f32, // own detector's confidence; 1 when the turn is not in doubt (#52)
+    conf: f32, // own detector's confidence; 1 when not measured (forced turn, vector, no --rotate) (#52, #158)
     angle: f32,
     w: i64,
     trim: Option<[i64; 4]>, // x0 y0 x1 y1
@@ -164,6 +165,12 @@ fn majority_turn(rots: impl Iterator<Item = u32>) -> u32 {
     rots.for_each(|r| n[(r / 90 % 4) as usize] += 1);
     let max = *n.iter().max().unwrap();
     if max == 0 || n.iter().filter(|&&c| c == max).count() > 1 { 0 } else { n.iter().position(|&c| c == max).unwrap() as u32 * 90 }
+}
+
+/// #158: a page takes the document's majority turn `q` when the own detector is unsure (#52), or says exactly the opposite
+/// (q + 180) with a confidence below OSD_FLIP_MIN_CONFIDENCE (Behrendt p. 25: sparse list page + dark book edge, 0.3).
+fn follows_document(rot: u32, conf: f32, q: u32) -> bool {
+    conf < OSD_OWN_MIN_CONFIDENCE || (rot == (q + 180) % 360 && conf < OSD_FLIP_MIN_CONFIDENCE)
 }
 
 /// What pass B cuts from a page: nothing (whole page), one box, or a split at gx.
@@ -315,8 +322,8 @@ fn main() {
     // Born-digital pages (#107) vote 0: they are upright by definition, so they keep a mixed scan from flipping.
     if cfg.rotate && !cfg.tess {
         let q = majority_turn(metas.iter().filter(|m| m.conf >= OSD_OWN_MIN_CONFIDENCE).map(|m| m.rot));
-        if q != 0 {
-            let low: Vec<usize> = (0..n).filter(|&i| metas[i].conf < OSD_OWN_MIN_CONFIDENCE).collect();
+        let low: Vec<usize> = (0..n).filter(|&i| follows_document(metas[i].rot, metas[i].conf, q)).collect();
+        if !low.is_empty() {
             let redo = par_pages(&data, n, |p, i| if low.contains(&i) { Some(measure(p, i, &cfg, Some(q))) } else { None });
             for (m, r) in metas.iter_mut().zip(redo) {
                 if let Some(r) = r {
@@ -491,7 +498,10 @@ fn measure(page: &Page, i: usize, cfg: &Cfg, force_rot: Option<u32>) -> Meta {
         (_, _, Some(q)) => q,
         (true, true, _) => osd(&g),
         (true, false, _) => match osd_own(&g, OSD_KA, OSD_KD, OSD_TILE) {
-            (q, c) if c >= OSD_OWN_MIN_CONFIDENCE => q,
+            (q, c) if c >= OSD_OWN_MIN_CONFIDENCE => {
+                conf = c; // #158: kept, so a weak half turn against the document can be told from a sure one
+                q
+            }
             (_, c) => {
                 conf = c;
                 0
@@ -3173,6 +3183,15 @@ mod tests {
 
     // Lines of "letters" (x-height bar, 30 % with an ascender above, 8 % with a descender below), turned by each quarter:
     // osd_own must undo the turn. Fails with the direction sign flipped.
+    #[test]
+    fn weak_half_turn_follows_document() {
+        assert!(follows_document(180, 0.34, 0));
+        assert!(!follows_document(180, 0.9, 0));
+        assert!(!follows_document(90, 0.34, 0));
+        assert!(follows_document(0, 0.1, 180)); // under the gate (#52)
+        assert!(!follows_document(180, 0.34, 180));
+    }
+
     #[test]
     fn orientation_found_for_all_turns() {
         let (w, h) = (1200usize, 1600usize);
