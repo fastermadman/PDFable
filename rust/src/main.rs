@@ -1571,7 +1571,7 @@ fn rotate(g: &Img, deg: f32, cw: usize, ch: usize, fill: f32) -> Img {
 /// A spine shadow, book edge or the rules next to it (#53) is one connected piece running most of the slot height,
 /// often slanted or bowed; text never is. Whiten such pieces in the outer zone of the slot.
 // ponytail: whitens the piece only; a crop or an alignment step (#55) would also move the text
-fn clear_edge_bands(bits: &mut [bool], w: usize, h: usize) {
+fn clear_vertical_bands(bits: &mut [bool], w: usize, h: usize, lone: bool) {
     let r = BAND_CLOSE;
     // close pinholes: dilate by r, sideways then down
     let mut d = vec![false; w * h];
@@ -1606,10 +1606,45 @@ fn clear_edge_bands(bits: &mut [bool], w: usize, h: usize) {
                 && ((b[1] as f64) < BAND_ZONE_FRAC * wf || (b[0] as f64) > (1.0 - BAND_ZONE_FRAC) * wf)
         })
         .collect();
+    // lone (#153): a stripe has no text outside it (a music staff or a rule inside the page has); ink of other pieces on the
+    // outer side must stay under 5 % of the stripe's own ink
+    let mut hit = hit;
+    if lone {
+        let mut beyond = vec![0usize; comps.len()];
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if bits[i] && c[i] && !hit[lab[i] as usize] {
+                    for (j, b) in bb.iter().enumerate().filter(|(j, _)| hit[*j]) {
+                        if (x < b[0] && (b[1] as f64) < BAND_ZONE_FRAC * wf) || (x > b[1] && (b[0] as f64) > (1.0 - BAND_ZONE_FRAC) * wf) {
+                            beyond[j] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // three or more such pieces side by side are the lines of a music staff, not a stripe
+        let mid: Vec<usize> = (0..hit.len()).filter(|&j| hit[j]).collect();
+        let staff = |j: usize| mid.iter().filter(|&&k| (bb[k][0] + bb[k][1]).abs_diff(bb[j][0] + bb[j][1]) as f64 <= 0.16 * wf).count() >= 3;
+        for j in 0..hit.len() {
+            hit[j] = hit[j] && beyond[j] * 20 <= comps[j].0 as usize && !staff(j);
+        }
+    }
     for i in 0..w * h {
         if bits[i] && c[i] && hit[lab[i] as usize] {
             bits[i] = false;
         }
+    }
+}
+
+/// Scanner-edge stripes (#153): the vertical rule above, and the same rule turned a quarter: a thin piece running most of the
+/// slot width in the top or bottom zone (Behrendt p10) is whitened. Done on the transposed map, so one rule serves both.
+fn clear_edge_bands(bits: &mut [bool], w: usize, h: usize) {
+    clear_vertical_bands(bits, w, h, false);
+    let mut t: Vec<bool> = (0..w * h).map(|i| bits[(i % h) * w + i / h]).collect();
+    clear_vertical_bands(&mut t, h, w, true);
+    for i in 0..w * h {
+        bits[(i % h) * w + i / h] = t[i];
     }
 }
 
@@ -3058,6 +3093,54 @@ mod tests {
         clear_edge_bands(&mut bits, w, h);
         assert!((0..h).all(|y| (0..60).all(|x| !bits[y * w + x])));
         assert!((0..h).all(|y| (60..w).all(|x| bits[y * w + x] == before[y * w + x])));
+    }
+
+    // A dotted, slightly slanted scanner stripe along the bottom (#153) is whitened; text lines, which do not run across
+    // the slot, and a rule in the middle are kept.
+    #[test]
+    fn horizontal_edge_stripe_cleared_text_kept() {
+        let (w, h) = (480usize, 400usize);
+        let mut bits = vec![false; w * h];
+        for x in 0..w {
+            let y0 = 330 + x / 120; // slants 4 px over the width
+            for y in y0..y0 + 5 {
+                bits[y * w + x] = (x + y) % 7 != 0; // dotted
+            }
+        }
+        for y in (40..260).step_by(20) {
+            for x in (60..400).step_by(20) {
+                for k in 0..10 {
+                    bits[y * w + x + k] = true; // words with gaps wider than the pinhole close
+                    bits[(y + 1) * w + x + k] = true;
+                }
+            }
+        }
+        let before = bits.clone();
+        clear_edge_bands(&mut bits, w, h);
+        assert!((310..h).all(|y| (0..w).all(|x| !bits[y * w + x])));
+        assert!((0..300).all(|y| (0..w).all(|x| bits[y * w + x] == before[y * w + x])));
+        // the same piece with text below it (a staff above a footer) is content, not a stripe
+        let mut inside = before.clone();
+        for x in (60..400).step_by(20) {
+            for k in 0..10 {
+                inside[380 * w + x + k] = true;
+                inside[381 * w + x + k] = true;
+            }
+        }
+        let kept = inside.clone();
+        clear_edge_bands(&mut inside, w, h);
+        assert!(inside == kept);
+        // five staff lines at the bottom with nothing below them stay
+        let mut staff = before.clone();
+        for y in (0..w * h).step_by(w).filter(|&y| y >= 330 * w) {
+            staff[y..y + w].fill(false);
+        }
+        for k in 0..5 {
+            staff[(340 + k * 14) * w..(340 + k * 14) * w + w].fill(true);
+        }
+        let kept = staff.clone();
+        clear_edge_bands(&mut staff, w, h);
+        assert!(staff == kept);
     }
 
     // Text-like lines skewed by +2° (falling to the right): skew_angle finds it, and rotate by that angle
