@@ -245,6 +245,12 @@ found the cause at once. The #45 idea ("darker than text is not text") did not a
   (3911 of 4640 words). `plan()` now crops each single page to its own box, unless that is narrower than 70 % of the median
   box (a near-empty page, Kirk p2/12/14): then the median. Behrendt 4582 words; no file has more pages with lost text.
   Cost: bigger pages and files (Behrendt +19 %, Ubbesen +11.8 %). ScanTailor, unpaper and Leptonica also pick a box per page.
+- **Horizontal scanner-edge stripes (#153).** With a box per page the stripe along the bottom or top stays (Behrendt: the book's own
+  bottom edge as a dotted black stripe, p3, 7, 10, 19, 23) and the widest page sets the file's page size. `clear_edge_bands` now also runs
+  on the transposed ink map: a thin piece over 60 % of the extent in the outer 35 % is whitened, but in the horizontal case only when
+  (almost) no other ink lies beyond it. The zone cannot be narrow: the book edge sits far inside the scan frame. The first version
+  without the "nothing beyond" rule erased the music staves on Stemmen sang p11 (a staff is a thin piece as long as the text block).
+  Numbers in the PR. A ruled table with nothing below it would still lose its last rule (not seen).
 
 ## Ideas to test (from #8, unverified: from web search/descriptions, not source-read)
 
